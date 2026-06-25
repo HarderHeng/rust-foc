@@ -11,8 +11,13 @@
 use embassy_stm32::{
     bind_interrupts,
     peripherals::USART2,
-    usart::{BufferedInterruptHandler, BufferedUart, Config},
-    Peripherals,
+    rcc::{
+        AHBPrescaler, APBPrescaler, Hse, HseMode, Pll, PllPreDiv, PllRDiv, PllSource,
+        PllMul, Sysclk,
+    },
+    time::Hertz,
+    usart::{BufferedInterruptHandler, BufferedUart, Config as UsartConfig},
+    Config as HalConfig, Peripherals,
 };
 
 use crate::drivers::debug_uart::Uart2Sink;
@@ -50,6 +55,43 @@ pub struct BoardHandles {
     pub debug_uart: DebugUartSink,
 }
 
+/// System clock configuration: HSE 8 MHz → PLL (×85 /4 = 170 MHz) → sysclk.
+///
+/// B-G431B-ESC1 has an 8 MHz HSE crystal (X2). We use the HSE instead of the
+/// default HSI for better baud-rate precision (~50x more stable than HSI's
+/// ±1% RC tolerance). USART2 source clock is APB1 = sysclk / 4 = 42.5 MHz,
+/// which gives 921600 baud with <0.4% BRR error.
+///
+/// `boost: true` is required because sysclk = 170 MHz is above the 150 MHz
+/// threshold for the default voltage range (range1 needs Vcore boost to
+/// reach 170 MHz per RM0440 §7.4.3).
+///
+/// `divr: Some(DIV2)` is required by the embassy-stm32 G4 driver API when
+/// the PLL is the sysclk source; the R output is unused (we use PLL1_P),
+/// but the API insists on it.
+pub fn clocks() -> HalConfig {
+    let mut config = HalConfig::default();
+    config.rcc.hsi = false;
+    config.rcc.hse = Some(Hse {
+        freq: Hertz::mhz(8),
+        mode: HseMode::Oscillator,
+    });
+    config.rcc.sys = Sysclk::PLL1_R;
+    config.rcc.pll = Some(Pll {
+        source: PllSource::HSE,
+        prediv: PllPreDiv::DIV1,
+        mul: PllMul::MUL85,
+        divp: None,
+        divq: None,
+        divr: Some(PllRDiv::DIV4),  // 680/4 = 170 MHz sysclk
+    });
+    config.rcc.ahb_pre = AHBPrescaler::DIV1;
+    config.rcc.apb1_pre = APBPrescaler::DIV4;
+    config.rcc.apb2_pre = APBPrescaler::DIV1;
+    config.rcc.boost = true;
+    config
+}
+
 pub fn board_init(p: Peripherals) -> BoardHandles {
     // SAFETY: This is a single-threaded (pre-executor) init function;
     // no other code has access to these statics yet.
@@ -58,7 +100,7 @@ pub fn board_init(p: Peripherals) -> BoardHandles {
     let rx_buf: &'static mut [u8] =
         unsafe { &mut *(&raw mut DEBUG_UART_RX_BUF as *mut [u8; DEBUG_UART_RX_BUF_SIZE]) };
 
-    let mut cfg = Config::default();
+    let mut cfg = UsartConfig::default();
     cfg.baudrate = DEBUG_UART_BAUD;
 
     let buffered: BufferedUart<'static> = BufferedUart::new(

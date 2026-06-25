@@ -15,7 +15,7 @@ use embassy_stm32::pac as _;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_stm32::init(Default::default());
+    let p = embassy_stm32::init(bsp::clocks());
     info!("{} on {}: HAL init ok", bsp::BOARD_NAME, bsp::BOARD_MCU);
 
     let handles = bsp::board_init(p);

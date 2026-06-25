@@ -119,8 +119,8 @@ main.rs 调 `board_init` 拿到 `BoardHandles`,把里面的字段 move 进各个
 
 ### 4. 时钟
 
-- 不写 custom config,直接用 `embassy_stm32::init(Default::default())`。
-- G431CB 默认配置:HSI16 → PLL → sysclk 170MHz,APB1 45MHz,APB2 90MHz。USART2 在 APB1,源时钟 45MHz,经过 USART 时钟分频后能精准给出 921600(USART 硬件 BRR 4-bit fraction 处理,误差 <0.5%)。
+- **时钟配置**(B-G431B-ESC1 板载 X2 8MHz 晶振,用 HSE 不用 HSI):HSE 8MHz → /1 → 8MHz VCO 输入 → ×85 = 680MHz VCO → /4 (PLLR) = **170 MHz sysclk**;AHB /1,APB1 /4 = **42.5 MHz**(USART2 源);APB2 /1 = 170 MHz。`boost = true`(sysclk > 150 MHz 需 Vcore boost)。USART2 @ 921600 BRR 误差 <0.4%。`src/bsp.rs::clocks()` 返回这个 Config;`main.rs` 调 `embassy_stm32::init(bsp::clocks())`。
+- **Bootloader 沿用同一 Config**:不写 custom clock config(避免 app/bootloader 切换时 USART 失锁;不同 APB1 → 921600 BRR 失准 → bootloader 收不到 shell 命令)。Task 1/2 把 `clocks()` 提到 `foc-common` 共享。
 
 ### 5. 日志双通道
 

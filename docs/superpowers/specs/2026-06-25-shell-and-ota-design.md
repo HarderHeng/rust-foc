@@ -244,9 +244,10 @@ shell task 和 heartbeat task 之间没有 `&mut` 竞争。`Uart2Sink` 在 board
 
 ### 5. 时钟
 
-- bootloader 沿用 app 的默认时钟配置:`embassy_stm32::init(Default::default())`
-- G431CB 默认 HSI16 → PLL → sysclk 170MHz,APB1 45MHz,USART2 源时钟 45MHz 下 BRR 4-bit fraction 可精准给出 921600(误差 <0.5%)。
-- 不为 bootloader 写 custom clock config
+- bootloader 与 app 用**同一个**时钟配置(避免 USART 失锁):两者都调 `foc_common::clocks()`(Task 1/2 在 `foc-common` 落地后;init scaffold 阶段临时放 `src/bsp.rs` 的 `clocks()`)
+- HSE 8MHz → /1 → 8MHz VCO 输入 → ×85 = 680MHz VCO → /4 (PLLR) = **170 MHz sysclk**;AHB /1,APB1 /4 = **42.5 MHz**(USART2 源);APB2 /1 = 170 MHz。`boost = true`(> 150 MHz 需 Vcore boost)
+- USART2 @ 921600 BRR 误差 <0.4%
+- **不**写 custom clock config(只是把 clocks() 函数提到 foc-common 共享)
 
 ### 6. CRC32 用 STM32G4 硬件 CRC 外设(配置成 CRC-32/ISO-HDLC)
 
