@@ -129,9 +129,18 @@ fn main() -> ! {
                     cortex_m::asm::delay(170_000_000 / 100); // ~10 ms at 170 MHz
                     cortex_m::peripheral::SCB::sys_reset();
                 }
-                Err(_e) => {
-                    uart_write_str("OTA error; power-cycle to retry\n");
-                    // Stay in bootloader per spec.
+                Err(crate::ymodem::YmodemError::Timeout) => {
+                    // Spec: timeout clears flag so power-cycle returns to app.
+                    let _ = clear_ota_flag(&mut flash);
+                    uart_write_str("OTA timeout, power cycle to return to app\n");
+                    loop {
+                        cortex_m::asm::wfi();
+                    }
+                }
+                Err(_) => {
+                    // Other errors (CRC mismatch, abort, etc.): keep flag set,
+                    // so power-cycle resumes OTA (doesn't go back to app).
+                    uart_write_str("OTA error; power cycle to retry\n");
                     loop {
                         cortex_m::asm::wfi();
                     }
