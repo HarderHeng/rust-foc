@@ -5,6 +5,8 @@
 **目标平台:** ST B-G431B-ESC1 (STM32G431CBU6, 128KB flash)
 **前置依赖:** [基础初始化 spec](./2026-06-25-b-g431b-esc1-initialization-design.md)、[128KB flash 容量评估](./2026-06-25-flash-budget-128kb.md)
 
+**Bootloader 选型决定(2026-06-25):** 采用**自写最简 bootloader**(单 slot,~13.5 KB),**不**使用 embassy-boot。理由:STM32G431CBU6 flash 仅 128KB,embassy-boot 的 ACTIVE+DFU 双分区模型把 app 区压到 ~58KB,装不下完整栈(FOC + shell + zencan + 持久化);自写 + 单 slot 给 app 留 108KB 够用。A/B 回滚 / power-fail safety 等 embassy-boot 优势,在换芯片(如 STM32G473 512KB)或上产品时再考虑。
+
 ## 目标
 
 在已有基础初始化之上,增加:
@@ -52,7 +54,7 @@ foc-rust/                                 # Cargo workspace
 │   ├── main.rs
 │   ├── bsp.rs
 │   ├── drivers/{mod.rs, debug_uart.rs}
-│   ├── app/{mod.rs, shell.rs, ota.rs}
+│   ├── commands/{mod.rs, shell.rs, ota.rs}
 │   └── tasks/{mod.rs, heartbeat.rs, shell.rs}
 ├── common/                               # **foc-common lib crate**(共享常量)
 │   ├── Cargo.toml
@@ -64,8 +66,6 @@ foc-rust/                                 # Cargo workspace
     └── src/
         ├── main.rs
         ├── ymodem.rs
-        ├── flash.rs
-        ├── crc.rs
         └── flag.rs
 ```
 
@@ -126,16 +126,16 @@ app 在 build 时(`build.rs` 后期步骤)把 magic + image_size + image_crc32 +
 |---|---|---|
 | `app::bsp` | embassy-stm32, drivers | 板级配置 + `board_init()` + `reset_to_bootloader()` |
 | `app::drivers::debug_uart` | embassy-stm32, embedded-io | `DebugShellSink` trait + `Uart2Sink` (已有,不改) |
-| `app::app::shell` | embedded-cli, drivers | 命令注册(5 条);提供 `shell_task` 启动入口 |
-| `app::app::ota` | cortex-m, ota-flag 常量 | `ota_update` 命令:写 flag + 提示 + sys_reset |
+| `app::drivers::flash` | embassy-stm32, embedded-storage | `Stm32g4Flash` 实现 `embedded_storage::NorFlash` |
+| `app::commands::shell` | embedded-cli, drivers | 命令注册(5 条);提供 `shell_task` 启动入口 |
+| `app::commands::ota` | cortex-m, foc-common | `ota_update` 命令:写 flag + 提示 + sys_reset |
 | `app::tasks::heartbeat` | defmt, embassy-time | 改走 defmt,持 `Ticker`,不持 Uart2Sink |
-| `app::tasks::shell` | drivers, app::shell | 异步任务:uart.read 循环 + cli.process_byte |
+| `app::tasks::shell` | drivers, app::commands::shell | 异步任务:uart.read 循环 + cli.process_byte |
 | `app::main` | 全部 | composition root |
-| `bootloader::main` | embassy-stm32, drivers | 入口,检查 flag → y-modem / 跳 app |
+| `bootloader::main` | embassy-stm32, drivers, foc-common | 入口,检查 flag → y-modem / 跳 app |
 | `bootloader::ymodem` | 串口读/写 | 协议状态机:SOH/STX/EOT/ACK/NAK/CAN |
-| `bootloader::flash` | embassy-stm32, cortex-m | STM32G4 flash 擦/写 |
-| `bootloader::crc` | (无外部 dep) | CRC32 校验 |
-| `bootloader::flag` | bootloader::flash | 读/写/清 flag 字节 |
+| `bootloader::flag` | foc-common | OTA_FLAG 读/写/清,基于 `OtaFlag` trait |
+| `foc-common::OtaFlag` | (无外部 dep) | trait + 共享地址常量 + `FlashOtaFlag<F>` 实现 |
 
 ## 状态机
 
@@ -248,13 +248,17 @@ shell task 和 heartbeat task 之间没有 `&mut` 竞争。`Uart2Sink` 在 board
 - G431CB 默认 HSI16 → PLL → sysclk 170MHz,APB1 45MHz,USART2 源时钟满足 115200 精准
 - 不为 bootloader 写 custom clock config
 
-### 6. 不接 STM32 硬件 CRC 外设
+### 6. CRC32 用 STM32G4 硬件 CRC 外设
 
-- STM32G4 有 CRC 外设,但本项目 CRC32 用软件实现:
-  - 软件表驱动 CRC32 ~100 行
-  - 避免依赖 `embassy-stm32` 的 CRC driver(可能拖出 PAC 类型)
-  - bootloader 想保持最简
-- 性能不是瓶颈(整个 image 100KB 算 CRC32 约 1ms 在 M4 上)
+- STM32G4 的 CRC 外设支持标准以太网 CRC32 (多项式 `0x04C11DB7`)+ 字节序反转,输出与软件 CRC32 一致
+- **不**引 `const-crc32-nostd`、**不**写 256 表软件实现,**直接调 PAC 寄存器**:
+  ```rust
+  pac.CRC.CR.write(|w| w.POLYSIZE().Bits32().REV_IN().Byte());
+  for byte in data { pac.CRC.DR.write(|b| b.DR().bits(*byte)); }
+  let result = pac.CRC.DR.read().DR().bits();
+  ```
+- 收益:删掉 `bootloader/crc.rs` 整个模块,省 ~100 行 + 1KB flash + 256 字节表(放 RAM)
+- 性能 0 损失(硬件算 100KB CRC 约 0.5ms,软件约 1ms)
 
 ## 错误处理
 
@@ -310,8 +314,9 @@ foc-rust/                                  # workspace 根
 │   ├── bsp.rs                             # 增加 reset_to_bootloader 辅助
 │   ├── drivers/
 │   │   ├── mod.rs
-│   │   └── debug_uart.rs                  # 不变
-│   ├── app/
+│   │   ├── debug_uart.rs                  # 不变
+│   │   └── flash.rs                       # 新:Stm32g4Flash: NorFlash
+│   ├── commands/                          # CLI 命令集(原 app/, 去重命名)
 │   │   ├── mod.rs
 │   │   ├── shell.rs                       # 新:命令注册表
 │   │   └── ota.rs                         # 新:OtaUpdateCommand
@@ -321,7 +326,9 @@ foc-rust/                                  # workspace 根
 │       └── shell.rs                       # 新:shell_task
 ├── common/                                # foc-common lib crate
 │   ├── Cargo.toml
-│   └── src/lib.rs                         # APP_START, OTA_FLAG, METADATA_* 常量
+│   └── src/
+│       ├── lib.rs                         # APP_START, OTA_FLAG, METADATA_* 常量
+│       └── flag.rs                        # 新:OtaFlag trait + FlashOtaFlag 实现
 ├── bootloader/
 │   ├── Cargo.toml                         # 独立 crate
 │   ├── memory.x                           # bootloader 段专属:FLASH 0..16K,RAM 0..32K
@@ -329,9 +336,7 @@ foc-rust/                                  # workspace 根
 │   └── src/
 │       ├── main.rs                        # 入口 + 状态机
 │       ├── ymodem.rs                      # y-modem 协议
-│       ├── flash.rs                       # STM32G4 flash helper
-│       ├── crc.rs                         # CRC32
-│       └── flag.rs                        # OTA_FLAG 读/写/清
+│       └── flag.rs                        # OTA_FLAG 操作(走 foc-common::OtaFlag)
 └── docs/
     └── superpowers/
         └── specs/
@@ -346,48 +351,58 @@ foc-rust/                                  # workspace 根
 
 ```toml
 [dependencies]
-embassy-stm32 = { version = "*", features = ["stm32g431cb", "defmt", "time-driver-any", "unstable-pac"] }
-embassy-executor = { version = "*", features = ["arch-cortex-m", "executor-thread", "defmt"] }
-embassy-time = { version = "*", features = ["defmt", "tick-hz-32_768"] }
-embassy-sync = "*"
-embedded-io = "0.7"
+# Embassy(版本号 = 锁当前 major,允许 patch/minor 浮动)
+embassy-stm32    = { version = "0.6",  features = ["stm32g431cb", "defmt", "time-driver-any", "unstable-pac"] }
+embassy-executor = { version = "0.10", features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-time     = { version = "0.5",  features = ["defmt", "tick-hz-32_768"] }
+embassy-sync     = "0.8"
 
-defmt = "*"
-defmt-rtt = "*"
+# Rust embedded 标准 trait
+embedded-io     = "0.7"     # UART/SPI 等字节流抽象
+embedded-storage = "0.3"    # NorFlash trait(替代自写 FlashStorage)
 
-cortex-m = "*"
-cortex-m-rt = "*"
-panic-probe = { version = "*", features = ["print-defmt"] }
+# 日志
+defmt     = "1"
+defmt-rtt = "1"
 
-# 已在基础初始化中锁定
+# Cortex-M 基础
+cortex-m    = "0.7"
+cortex-m-rt = "0.7"
+panic-probe = { version = "1", features = ["print-defmt"] }
+
+# shell(锁版本:生态里没有更靠谱的,bus factor 1 可接受)
 embedded-cli = { version = "0.2.1", default-features = false, features = ["ufmt"] }
 
-# 与 bootloader 共享的常量(flag 地址)
-foc-common = { path = "common" }   # 本 spec 新增:workspace 内的 lib crate
+# 与 bootloader 共享
+foc-common = { path = "common" }
 
-[build-dependencies]
-embassy-build = "*"
+[dev-dependencies]
+# host-side 测试 flash 抽象
+embedded-storage-inmemory = "0.1"
 ```
+
+> **注意:** 没有 `[build-dependencies]` 块。`embassy-build` 这个 crate 在 crates.io 不存在,link script 通过 `build.rs` 里 `println!("cargo:rustc-link-arg-bins=...")` 直接打。
 
 ### bootloader crate
 
 ```toml
 [dependencies]
-embassy-stm32 = { version = "*", features = ["stm32g431cb", "time-driver-any", "unstable-pac"] }
-embassy-time = "*"
-cortex-m = "*"
-cortex-m-rt = "*"
-embedded-io = "0.7"
-foc-common = { path = "../common" }   # OTA_FLAG 地址常量
+# Bootloader 不需要 async runtime,只引底层
+embassy-stm32    = { version = "0.6",  features = ["stm32g431cb", "time-driver-any", "unstable-pac"] }
+cortex-m         = "0.7"
+cortex-m-rt      = "0.7"
+embedded-io      = "0.7"     # Uart 字节流
+embedded-storage = "0.3"     # NorFlash trait
+foc-common       = { path = "../common" }
 ```
 
-**不引 defmt** — bootloader 用裸 `uart.write_str` 调试,避免 defmt-rtt 占 flash。
+**不引 defmt / defmt-rtt / embassy-executor / embassy-time** — bootloader 是纯同步,裸 `uart.write_str` 调试。这省下 ~2-3KB flash。
 
 ### `foc-common` lib crate
 
 ```toml
 [dependencies]
-# 纯常量,无 dep
+# 纯常量 + OtaFlag trait,无外部 dep
 ```
 
 ```rust
@@ -408,7 +423,57 @@ pub const METADATA_MAGIC: u32 = 0xDEAD_BEEF;
 pub const METADATA_SIZE: usize = 32;  // 实际只用 32 字节,段内保留空间
 ```
 
-两个 crate 通过 `foc-common` 共享这些常量,避免魔法数字散落。
+```rust
+// common/src/flag.rs
+use embedded_storage::nor_flash::NorFlash;
+
+pub enum OtaState { Pending, None }
+
+/// flag 操作抽象。app 和 bootloader 各自实现各自的。
+/// 双方通过 `foc-common` 共享状态字节地址。
+pub trait OtaFlag {
+    fn read(&self) -> OtaState;
+    fn set_pending(&mut self) -> Result<(), FlashError>;
+    fn clear(&mut self) -> Result<(), FlashError>;
+}
+
+/// 唯一实现(目前)。基于任何 `NorFlash` + 地址。
+/// 由 `bsp` 实例化并通过 trait 暴露给上层。
+pub struct FlashOtaFlag<F: NorFlash> { storage: F, addr: u32 }
+
+impl<F: NorFlash> OtaFlag for FlashOtaFlag<F> { ... }
+
+pub type FlashError = F::Error;
+```
+
+两个 crate 通过 `foc-common` 共享常量与 `OtaFlag` 抽象。`foc-common` 自身只依赖 `embedded-storage` (trait-only,不影响体积)。
+
+## 未来可能性:embassy-boot(暂不引入)
+
+embassy-rs 官方有 `embassy-boot` + `embassy-boot-stm32`(2026-03 还在更新,见 [embassy-boot 0.7](https://docs.embassy.dev/embassy-boot/)),提供:
+
+- A/B 双分区 + swap 状态机
+- Power-fail 安全升级
+- 可选 ed25519 签名验证
+- ~8KB bootloader + 2KB state
+
+**为何本期不引入(128KB flash 装不下):**
+
+| 方案 | bootloader | state | ACTIVE | DFU | app 总可用 |
+|---|---|---|---|---|---|
+| 自写(本 spec) | 13.5KB | 0(用 config page 替代) | 108KB | 0(单 slot) | **108 KB** |
+| embassy-boot(单 slot 假象) | 8KB | 2KB | 58KB | 58KB+ | 58 KB(被压半) |
+| embassy-boot(真 A/B) | 8KB | 2KB | 28KB | 28KB | 28 KB |
+
+完整栈(FOC + shell + zencan + 持久化)估 ~67 KB,只有自写能装下。
+
+**何时重新评估:**
+
+- 换芯片到 STM32G473 (512KB flash)→ ACTIVE 翻 4 倍,embassy-boot 优势显现
+- 商业化,需要 A/B 回滚防止"升级失败砖机"风险
+- 上了实际产品,愿意接受 embassy-boot 的"用空间换可靠性"
+
+**移植成本预估:** 半天到一天,把 f3 example 的 linker 与 main.rs 改一下。主要工作:替换 y-modem 调用为 `FirmwareUpdater::write_firmware`,bootloader 改用 `BootLoader::prepare::<2048>()` + `unsafe load()`。`OtaFlag` trait 改用 `FirmwareState` API,其余代码不需要动。
 
 ## 风险与未决项
 
