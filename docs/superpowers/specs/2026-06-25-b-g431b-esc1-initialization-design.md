@@ -278,6 +278,7 @@ strip = true
 - **依赖版本**:Cargo.toml 里写 `"*"`,让 cargo 解出当前可用版本。锁版本是 CI 阶段的事,初始骨架阶段不锁。
 - **UART ringbuffer 阻塞**:当 shell 一次性输出 > 256B 时(例如 dump 整个 `defmt` 日志),`Write::write` 会因 ringbuffer 满而忙等,**阻塞 shell task 期间 executor 不调度其他 task**。本阶段不写大输出命令,无影响;但 shell 实现 spec 必须约定:长输出必须分片 + 主动让出(例如 `for chunk in data.chunks(64) { w.write(chunk)?; embassy_time::Timer::after_millis(1).await; }`)。
 - **`embedded-cli` 单维护者风险**:funbiscuit 一人维护,bus factor = 1。仓库里固定 crate 版本(写进 `Cargo.lock`),fork 路径在 `funbiscuit/embedded-cli-rs` 文档化。
+- **128KB flash 容量风险**:本 spec 之后若加 OTA、zencan(CANopen)、完整 FOC,flash 占用会逼近 115 KB,余量 0-15 KB。**任何新 feature 都需要重新评估**。详见 [`2026-06-25-flash-budget-128kb.md`](./2026-06-25-flash-budget-128kb.md)。建议:阶段 1 不加 OTA/CANopen,先把 FOC + shell 跑通;后续或换芯片(STM32G473RE 512KB)。
 
 ## 后续
 
