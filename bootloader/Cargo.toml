@@ -1,0 +1,19 @@
+[package]
+name = "bootloader"
+version = "0.1.0"
+edition = "2021"
+authors = ["heng"]
+description = "y-modem bootloader for B-G431B-ESC1"
+publish = false
+
+[[bin]]
+name = "bootloader"
+path = "src/main.rs"
+
+[dependencies]
+embassy-stm32 = { version = "0.6", features = ["stm32g431cb", "time-driver-any", "unstable-pac", "memory-x"] }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+embedded-io = "0.7"
+embedded-storage = "0.3"
+foc-common = { path = "../common" }

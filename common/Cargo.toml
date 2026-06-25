@@ -1,0 +1,12 @@
+[package]
+name = "foc-common"
+version = "0.1.0"
+edition = "2021"
+authors = ["heng"]
+description = "Shared constants and traits for foc-rust app + bootloader"
+publish = false
+
+[dependencies]
+# Pure constants + OtaFlag trait. embedded-storage is dep-only for the trait bound,
+# not for any heavy runtime code.
+embedded-storage = "0.3"

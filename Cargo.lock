@@ -78,6 +78,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootloader"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "embassy-stm32",
+ "embedded-io 0.7.1",
+ "embedded-storage",
+ "foc-common",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -609,6 +621,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "foc-common"
+version = "0.1.0"
+dependencies = [
+ "embedded-storage",
+]
+
+[[package]]
 name = "foc-rust"
 version = "0.1.0"
 dependencies = [
@@ -623,6 +642,7 @@ dependencies = [
  "embedded-cli",
  "embedded-io 0.7.1",
  "embedded-storage-inmemory",
+ "foc-common",
  "panic-probe",
 ]
 
