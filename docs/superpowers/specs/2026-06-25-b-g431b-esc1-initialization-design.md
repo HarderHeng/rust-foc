@@ -103,7 +103,7 @@ impl embedded_io::Write for Uart2Sink<'_> { ... }  // 给 embedded-cli 用
 pub const BOARD_NAME: &str = "B-G431B-ESC1";
 pub const BOARD_MCU: &str = "STM32G431CBU6";
 
-pub const DEBUG_UART_BAUD: u32 = 115_200;
+pub const DEBUG_UART_BAUD: u32 = 921_600;
 pub const DEBUG_UART_TX_PIN: char = 'B'; pub const DEBUG_UART_TX_NUM: u8 = 3;
 pub const DEBUG_UART_RX_PIN: char = 'B'; pub const DEBUG_UART_RX_NUM: u8 = 4;
 pub const DEBUG_UART_AF: u8 = 7;
@@ -120,7 +120,7 @@ main.rs 调 `board_init` 拿到 `BoardHandles`,把里面的字段 move 进各个
 ### 4. 时钟
 
 - 不写 custom config,直接用 `embassy_stm32::init(Default::default())`。
-- G431CB 默认配置:HSI16 → PLL → sysclk 170MHz,APB1 45MHz,APB2 90MHz。USART2 在 APB1,源时钟 45MHz,经过 USART 时钟分频后能精准给出 115200。
+- G431CB 默认配置:HSI16 → PLL → sysclk 170MHz,APB1 45MHz,APB2 90MHz。USART2 在 APB1,源时钟 45MHz,经过 USART 时钟分频后能精准给出 921600(USART 硬件 BRR 4-bit fraction 处理,误差 <0.5%)。
 
 ### 5. 日志双通道
 
@@ -199,7 +199,7 @@ embassy_stm32::init() ──┐
 2. **下载成功**:`cargo run` (probe-rs) 能烧录
 3. **运行可见**:
    - RTT 通道看到 defmt 心跳
-   - USART2 串口(`screen /dev/ttyACM* 115200` 或 USB-TTL 接 PB3/PB4)看到 `[hb] tick` 字符串
+   - USART2 串口(`screen /dev/ttyACM* 921600` 或 USB-TTL 接 PB3/PB4)看到 `[hb] tick` 字符串
 
 ## 文件结构
 

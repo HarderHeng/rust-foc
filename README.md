@@ -28,7 +28,7 @@ cargo run                # probe-rs runs + shows RTT
 Open a second terminal to see USART2 output:
 
 ```bash
-screen /dev/ttyUSB0 115200    # or whichever TTY your USB-TTL is on
+screen /dev/ttyUSB0 921600    # or whichever TTY your USB-TTL is on (921600 = 8x faster than 115200)
 ```
 
 ## Architecture

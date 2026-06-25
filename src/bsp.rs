@@ -27,7 +27,7 @@ pub type DebugUartSink = Uart2Sink<BufferedUart<'static>>;
 pub const BOARD_NAME: &str = "B-G431B-ESC1";
 pub const BOARD_MCU: &str = "STM32G431CBU6";
 
-pub const DEBUG_UART_BAUD: u32 = 115_200;
+pub const DEBUG_UART_BAUD: u32 = 921_600;
 pub const DEBUG_UART_TX_PORT: char = 'B';
 pub const DEBUG_UART_TX_PIN: u8 = 3;
 pub const DEBUG_UART_RX_PORT: char = 'B';

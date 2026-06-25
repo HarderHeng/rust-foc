@@ -245,7 +245,7 @@ shell task 和 heartbeat task 之间没有 `&mut` 竞争。`Uart2Sink` 在 board
 ### 5. 时钟
 
 - bootloader 沿用 app 的默认时钟配置:`embassy_stm32::init(Default::default())`
-- G431CB 默认 HSI16 → PLL → sysclk 170MHz,APB1 45MHz,USART2 源时钟满足 115200 精准
+- G431CB 默认 HSI16 → PLL → sysclk 170MHz,APB1 45MHz,USART2 源时钟 45MHz 下 BRR 4-bit fraction 可精准给出 921600(误差 <0.5%)。
 - 不为 bootloader 写 custom clock config
 
 ### 6. CRC32 用 STM32G4 硬件 CRC 外设(配置成 CRC-32/ISO-HDLC)
