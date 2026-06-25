@@ -10,3 +10,5 @@ publish = false
 # Pure constants + OtaFlag trait. embedded-storage is dep-only for the trait bound,
 # not for any heavy runtime code.
 embedded-storage = "0.3"
+
+defmt = { version = "1", optional = true }

@@ -10,13 +10,14 @@ authors = ["heng"]
 description = "Field Oriented Control firmware in Rust on B-G431B-ESC1"
 
 [dependencies]
-foc-common = { path = "common" }
+foc-common = { path = "common", features = ["defmt"] }
 embassy-stm32 = { version = "0.6", features = ["stm32g431cb", "defmt", "time-driver-any", "unstable-pac", "memory-x"] }
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
 
 embassy-time = { version = "0.5", features = ["defmt", "tick-hz-32_768"] }
 embassy-sync = "0.8"
 embedded-io = "0.7"
+embedded-io-06 = { package = "embedded-io", version = "0.6" }
 
 defmt = "1"
 defmt-rtt = "1"
@@ -26,6 +27,7 @@ cortex-m-rt = "0.7"
 panic-probe = { version = "1", features = ["print-defmt"] }
 
 # Locked for next spec (shell task)
+embedded-storage = "0.3"
 embedded-cli = { version = "0.2.1" }
 
 [dev-dependencies]

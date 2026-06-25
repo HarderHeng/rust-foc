@@ -15,6 +15,7 @@ pub enum OtaState {
 
 /// Errors from flag operations. Wrapper over the underlying flash error.
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum FlagError<F: NorFlash> {
     /// Underlying flash error.
     Flash(F::Error),

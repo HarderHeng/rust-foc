@@ -2,6 +2,7 @@
 #![no_main]
 
 mod bsp;
+mod commands;
 mod drivers;
 mod tasks;
 

@@ -1,8 +1,10 @@
 //! Debug serial output driver for USART2.
 //!
-//! `Uart2Sink` wraps a `BufferedUart` and implements both:
+//! `Uart2Sink` wraps a `BufferedUart` and implements:
 //! - [`DebugShellSink`]: high-level `&str` writing for app tasks
-//! - `embedded_io::Write`: standard interface for third-party libs (e.g. `embedded-cli`)
+//! - `embedded_io::Write` (v0.7): standard interface for third-party libs
+//! - `embedded-io-06` `Write` + `ErrorType`: adapter for `embedded-cli` 0.2.1
+//!   (which depends on `embedded-io` 0.6.x internally)
 //!
 //! All blocking semantics: this sink writes synchronously to a TX ringbuffer.
 //! Long blocking is only possible if the ringbuffer is full.
@@ -35,6 +37,11 @@ impl<U> Uart2Sink<U> {
     pub fn new(inner: U) -> Self {
         Self { inner }
     }
+
+    /// Access the inner writer (v0.7 `embedded_io::Write`).
+    pub fn inner(&mut self) -> &mut U {
+        &mut self.inner
+    }
 }
 
 impl<U: embedded_io::Write> DebugShellSink for Uart2Sink<U> {
@@ -66,5 +73,78 @@ impl<U: embedded_io::Write> embedded_io::Write for Uart2Sink<U> {
 
     fn flush(&mut self) -> Result<(), Self::Error> {
         self.inner.flush()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// embedded-io v0.6 adapter for embedded-cli compatibility
+//
+// `embedded-cli` 0.2.1 depends on `embedded-io` 0.6.x internally.  We
+// implement v0.6 traits on a separate newtype (`Uart2Sink06`) because the
+// Rust trait system treats v0.6 and v0.7 as different traits, and embassy's
+// `BufferedUart` only implements v0.7 `Write`.
+//
+// The v0.6 `Error` trait requires `kind() -> ErrorKind`, which embassy
+// `usart::Error` does not provide (it only has the v0.7 `Error` impl).
+// `UsartError06` bridges this gap.
+// ---------------------------------------------------------------------------
+
+use core::fmt;
+use embassy_stm32::usart::{BufferedUart, Error as UsartError};
+use embedded_io::Write as _;
+use embedded_io_06 as eio06;
+
+/// v0.6 `Error` wrapper around `embassy_stm32::usart::Error`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UsartError06(UsartError);
+
+impl UsartError06 {
+    const fn kind(&self) -> eio06::ErrorKind {
+        eio06::ErrorKind::Other
+    }
+}
+
+impl eio06::Error for UsartError06 {
+    fn kind(&self) -> eio06::ErrorKind {
+        eio06::ErrorKind::Other
+    }
+}
+
+impl From<UsartError> for UsartError06 {
+    fn from(e: UsartError) -> Self {
+        UsartError06(e)
+    }
+}
+
+impl fmt::Display for UsartError06 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Wraps a `Uart2Sink<BufferedUart<'static>>` and implements `embedded-io` 0.6
+/// traits for use with `embedded-cli` 0.2.1.
+pub struct Uart2Sink06 {
+    inner: Uart2Sink<BufferedUart<'static>>,
+}
+
+impl Uart2Sink06 {
+    /// Wrap a concrete debug sink.
+    pub fn new(inner: Uart2Sink<BufferedUart<'static>>) -> Self {
+        Self { inner }
+    }
+}
+
+impl eio06::ErrorType for Uart2Sink06 {
+    type Error = UsartError06;
+}
+
+impl eio06::Write for Uart2Sink06 {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.inner.inner().write(buf).map_err(UsartError06)
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.inner.inner().flush().map_err(UsartError06)
     }
 }
