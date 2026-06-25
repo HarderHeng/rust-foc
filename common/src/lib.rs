@@ -1,2 +1,7 @@
 #![no_std]
-// Placeholder. Task 2 adds addresses, OtaFlag trait, and FlashOtaFlag impl.
+
+pub mod addresses;
+pub mod flag;
+
+pub use addresses::*;
+pub use flag::*;
