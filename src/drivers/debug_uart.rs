@@ -7,9 +7,6 @@
 //! All blocking semantics: this sink writes synchronously to a TX ringbuffer.
 //! Long blocking is only possible if the ringbuffer is full.
 
-// Task 4 deviation: this module is part of the task tree but is not yet wired
-// into the composition root. Suppress dead-code warnings on the public API
-// surface that task modules (5, 6, 7) will depend on.
 #![allow(dead_code)]
 
 /// High-level sink for debug shell output.
@@ -26,22 +23,21 @@ pub trait DebugShellSink {
 
 /// USART2-backed debug sink.
 ///
-/// `'d` is the lifetime of the USART peripheral borrowed from `embassy-stm32`.
-/// The type parameter `U` is the underlying buffered UART type (left as
-/// `?Sized` for now; in Task 5 we tighten it).
-pub struct Uart2Sink<'d, U: ?Sized> {
-    inner: &'d mut U,
+/// Owns the underlying buffered UART type (not borrows it). This lets
+/// the BSP return a `Uart2Sink` by value from `board_init()` and move
+/// it into a task without lifetime gymnastics.
+pub struct Uart2Sink<U> {
+    inner: U,
 }
 
-impl<'d, U: ?Sized> Uart2Sink<'d, U> {
-    /// Construct a sink from a borrowed buffered UART.
-    /// Will be wired to actual `BufferedUart` in Task 5.
-    pub fn new(inner: &'d mut U) -> Self {
+impl<U> Uart2Sink<U> {
+    /// Construct a sink from an owned buffered UART.
+    pub fn new(inner: U) -> Self {
         Self { inner }
     }
 }
 
-impl<'d, U: embedded_io::Write + ?Sized> DebugShellSink for Uart2Sink<'d, U> {
+impl<U: embedded_io::Write> DebugShellSink for Uart2Sink<U> {
     type Error = U::Error;
 
     fn write_str(&mut self, s: &str) -> Result<(), Self::Error> {
@@ -59,11 +55,11 @@ impl<'d, U: embedded_io::Write + ?Sized> DebugShellSink for Uart2Sink<'d, U> {
     }
 }
 
-impl<'d, U: embedded_io::Write + ?Sized> embedded_io::ErrorType for Uart2Sink<'d, U> {
+impl<U: embedded_io::Write> embedded_io::ErrorType for Uart2Sink<U> {
     type Error = U::Error;
 }
 
-impl<'d, U: embedded_io::Write + ?Sized> embedded_io::Write for Uart2Sink<'d, U> {
+impl<U: embedded_io::Write> embedded_io::Write for Uart2Sink<U> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         self.inner.write(buf)
     }
