@@ -1,0 +1,94 @@
+//! Async shell task.
+//!
+//! Owns the debug UART (USART2) split into TX / RX halves.
+//!   - The TX half is wrapped to provide `embedded-io` v0.6 `Write` for
+//!     `embedded-cli` 0.2.1 (which depends on v0.6 internally).
+//!   - The RX half provides `embedded_io_async::Read` for byte-level input.
+//!
+//! The loop reads one byte at a time from the RX half (async, waiting until
+//! data is available) and feeds it into `Cli::process_byte()`. The Cli
+//! handles line editing, built-in help (`-h`), and command dispatch.
+
+use defmt::info;
+use embassy_stm32::usart::{BufferedUartRx, BufferedUartTx};
+use embedded_cli::__private::io as eio06;
+use embedded_io_async::Read;
+
+use crate::commands::shell::{make_processor, ShellCommand};
+use crate::drivers::debug_uart::UsartError06;
+
+/// Buffer sizes for the embedded-cli line editor and history.
+const CMD_BUF_SIZE: usize = 64;
+const HIST_BUF_SIZE: usize = 128;
+
+// ---------------------------------------------------------------------------
+// V0.6 Write adapter for BufferedUartTx
+// ---------------------------------------------------------------------------
+
+/// Wraps a `BufferedUartTx<'static>` and implements `embedded-io` v0.6 `Write`,
+/// matching the trait version used by `embedded-cli` 0.2.1.
+struct TxWriter06 {
+    inner: BufferedUartTx<'static>,
+}
+
+impl eio06::ErrorType for TxWriter06 {
+    type Error = UsartError06;
+}
+
+impl eio06::Write for TxWriter06 {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        // Delegate to the v0.7 `embedded_io::Write` impl on BufferedUartTx.
+        // The fully-qualified call avoids ambiguity with the v0.6 trait we're
+        // implementing here.
+        <BufferedUartTx<'_> as embedded_io::Write>::write(&mut self.inner, buf)
+            .map_err(UsartError06::from)
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        <BufferedUartTx<'_> as embedded_io::Write>::flush(&mut self.inner)
+            .map_err(UsartError06::from)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shell task
+// ---------------------------------------------------------------------------
+
+/// Async shell task.  Takes ownership of the TX and RX halves of the debug
+/// UART and runs an interactive command-line interface.
+#[embassy_executor::task]
+pub async fn shell_task(tx: BufferedUartTx<'static>, mut rx: BufferedUartRx<'static>) {
+    info!("shell task started");
+
+    // Wrap TX into a v0.6 writer for embedded-cli.
+    let tx06 = TxWriter06 { inner: tx };
+
+    // Build the Cli (line editor + prompt).  The Cli owns the writer
+    // and uses it for prompt, echo, and command output.
+    let mut cli = embedded_cli::cli::CliBuilder::default()
+        .writer(tx06)
+        .command_buffer([0u8; CMD_BUF_SIZE])
+        .history_buffer([0u8; HIST_BUF_SIZE])
+        .build()
+        .unwrap();
+
+    // Build the processor closure once (dispatches to all 5 commands).
+    let mut processor = make_processor::<TxWriter06, _>();
+
+    loop {
+        // Read one byte from the UART RX (async, waits for data).
+        let mut buf = [0u8; 1];
+        match rx.read(&mut buf).await {
+            Ok(_) => {}
+            Err(_) => {
+                // Read error (framing, overrun, etc.) — skip and retry.
+                continue;
+            }
+        }
+
+        // Feed the byte into the CLI line editor / command processor.
+        // The `C` generic parameter is `ShellCommand` (provides help /
+        // autocomplete).  The `P` parameter is the processor closure.
+        let _ = cli.process_byte::<ShellCommand, _>(buf[0], &mut processor);
+    }
+}

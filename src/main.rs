@@ -8,6 +8,7 @@ mod tasks;
 
 use defmt::info;
 use embassy_executor::Spawner;
+use embassy_stm32::usart::BufferedUart;
 use panic_probe as _;
 
 // Linker retention (required — do not remove)
@@ -22,13 +23,17 @@ async fn main(spawner: Spawner) {
     let handles = bsp::board_init(p);
     info!("board_init done; USART2 ringbuffer ready");
 
-    // Spawn the heartbeat task. In embassy-executor 0.10, the
-    // `#[embassy_executor::task]` macro returns a `Result<SpawnToken,
-    // SpawnError>` from the function call (the inner `.unwrap()`), and
-    // `Spawner::spawn` consumes the token returning `()`. (Tried with
-    // an outer `.unwrap()` on the spawner call too — fails to compile
-    // in 0.10 because `Spawner::spawn` returns `()`, not `Result`.)
-    spawner.spawn(tasks::heartbeat(handles.debug_uart).unwrap());
+    // Split the BufferedUart into TX / RX halves so the shell task can
+    // write (via embedded-cli) and read (via embedded_io_async::Read)
+    // independently.
+    let buffered_uart: BufferedUart<'static> = handles.debug_uart.into_inner();
+    let (tx, rx) = buffered_uart.split();
+
+    // Spawn the heartbeat task (defmt-only, no USART2).
+    spawner.spawn(tasks::heartbeat().unwrap());
+
+    // Spawn the shell task — takes ownership of TX and RX halves.
+    spawner.spawn(tasks::shell_task(tx, rx).unwrap());
 
     // Main task: park in WFI forever. Real work happens in spawned tasks.
     loop {

@@ -42,6 +42,11 @@ impl<U> Uart2Sink<U> {
     pub fn inner(&mut self) -> &mut U {
         &mut self.inner
     }
+
+    /// Consume self and recover the inner value.
+    pub fn into_inner(self) -> U {
+        self.inner
+    }
 }
 
 impl<U: embedded_io::Write> DebugShellSink for Uart2Sink<U> {
