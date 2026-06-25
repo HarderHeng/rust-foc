@@ -4,6 +4,7 @@
 mod bsp;
 mod commands;
 mod drivers;
+mod metadata;
 mod tasks;
 
 use defmt::info;
@@ -22,6 +23,15 @@ async fn main(spawner: Spawner) {
 
     let handles = bsp::board_init(p);
     info!("board_init done; USART2 ringbuffer ready");
+
+    // Log firmware metadata if a valid block was injected into flash.
+    if let Some(meta) = metadata::read() {
+        let version_str = core::str::from_utf8(&meta.version).unwrap_or("?");
+        info!("Firmware: {} (built {})", version_str, meta.build_timestamp);
+        info!("  image: {} bytes, CRC32 0x{:08x}", meta.image_size, meta.image_crc32);
+    } else {
+        info!("No valid metadata (first boot or unprogrammed)");
+    }
 
     // Split the BufferedUart into TX / RX halves so the shell task can
     // write (via embedded-cli) and read (via embedded_io_async::Read)
