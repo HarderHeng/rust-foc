@@ -7,6 +7,11 @@
 //! All blocking semantics: this sink writes synchronously to a TX ringbuffer.
 //! Long blocking is only possible if the ringbuffer is full.
 
+// Task 4 deviation: this module is part of the task tree but is not yet wired
+// into the composition root. Suppress dead-code warnings on the public API
+// surface that task modules (5, 6, 7) will depend on.
+#![allow(dead_code)]
+
 /// High-level sink for debug shell output.
 ///
 /// Tasks should depend on this trait, not on the concrete USART type.
@@ -54,9 +59,11 @@ impl<'d, U: embedded_io::Write + ?Sized> DebugShellSink for Uart2Sink<'d, U> {
     }
 }
 
-impl<'d, U: embedded_io::Write + ?Sized> embedded_io::Write for Uart2Sink<'d, U> {
+impl<'d, U: embedded_io::Write + ?Sized> embedded_io::ErrorType for Uart2Sink<'d, U> {
     type Error = U::Error;
+}
 
+impl<'d, U: embedded_io::Write + ?Sized> embedded_io::Write for Uart2Sink<'d, U> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         self.inner.write(buf)
     }
