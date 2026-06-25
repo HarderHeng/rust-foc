@@ -21,7 +21,7 @@ cortex-m-rt = "0.7"
 panic-probe = { version = "1", features = ["print-defmt"] }
 
 # Locked for next spec (shell task)
-embedded-cli = { version = "0.2.1", default-features = false }
+embedded-cli = { version = "0.2.1" }
 
 [dev-dependencies]
 embedded-storage-inmemory = "0.1"
