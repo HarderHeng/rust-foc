@@ -3,6 +3,7 @@
 
 mod crc;
 mod flash;
+mod uart;
 mod ymodem;
 
 use cortex_m_rt::entry;
