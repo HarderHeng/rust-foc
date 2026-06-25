@@ -17,6 +17,13 @@ use embassy_stm32::{
 
 use crate::drivers::debug_uart::Uart2Sink;
 
+/// Type alias for the debug UART sink handed to tasks.
+///
+/// Using an alias (rather than a bare `Uart2Sink<BufferedUart<'static>>`)
+/// lets the tasks layer stay free of HAL imports — it depends only on
+/// the BSP's public type, not on `embassy_stm32` directly.
+pub type DebugUartSink = Uart2Sink<BufferedUart<'static>>;
+
 pub const BOARD_NAME: &str = "B-G431B-ESC1";
 pub const BOARD_MCU: &str = "STM32G431CBU6";
 
@@ -40,7 +47,7 @@ bind_interrupts!(struct Irqs {
 });
 
 pub struct BoardHandles {
-    pub debug_uart: Uart2Sink<BufferedUart<'static>>,
+    pub debug_uart: DebugUartSink,
 }
 
 pub fn board_init(p: Peripherals) -> BoardHandles {
