@@ -248,17 +248,66 @@ shell task 和 heartbeat task 之间没有 `&mut` 竞争。`Uart2Sink` 在 board
 - G431CB 默认 HSI16 → PLL → sysclk 170MHz,APB1 45MHz,USART2 源时钟满足 115200 精准
 - 不为 bootloader 写 custom clock config
 
-### 6. CRC32 用 STM32G4 硬件 CRC 外设
+### 6. CRC32 用 STM32G4 硬件 CRC 外设(配置成 CRC-32/ISO-HDLC)
 
-- STM32G4 的 CRC 外设支持标准以太网 CRC32 (多项式 `0x04C11DB7`)+ 字节序反转,输出与软件 CRC32 一致
-- **不**引 `const-crc32-nostd`、**不**写 256 表软件实现,**直接调 PAC 寄存器**:
-  ```rust
-  pac.CRC.CR.write(|w| w.POLYSIZE().Bits32().REV_IN().Byte());
-  for byte in data { pac.CRC.DR.write(|b| b.DR().bits(*byte)); }
-  let result = pac.CRC.DR.read().DR().bits();
-  ```
-- 收益:删掉 `bootloader/crc.rs` 整个模块,省 ~100 行 + 1KB flash + 256 字节表(放 RAM)
-- 性能 0 损失(硬件算 100KB CRC 约 0.5ms,软件约 1ms)
+**算法选择:** **CRC-32/ISO-HDLC**(zlib / gzip / PNG / Ethernet / zip 用的标准 CRC32)
+
+| 参数 | 值 |
+|---|---|
+| 多项式 | `0x04C11DB7` |
+| 初始值 | `0xFFFFFFFF` |
+| 输入位反转 | 按字节(byte-level) |
+| 输出位反转 | 是 |
+| 最终 XOR | `0xFFFFFFFF`(软件做) |
+
+**STM32G4 CRC 外设现状(参考手册 RM0440):**
+
+| 配置项 | 寄存器 | 默认值 | 标准 CRC-32 需求 | 需配置? |
+|---|---|---|---|---|
+| 多项式 | `CRC.POL` | `0x04C11DB7` ✓ | 同 | 否 |
+| 多项式位数 | `CRC.CR.POLYSIZE` | 32 bits ✓ | 同 | 否 |
+| 初始值 | `CRC.INIT` | `0xFFFFFFFF` ✓ | 同 | 否 |
+| 输入反转 | `CRC.CR.REV_IN` | 不反转 ✗ | 字节反转 | **是** |
+| 输出反转 | `CRC.CR.REV_OUT` | 不反转 ✗ | 反转 | **是** |
+| 最终 XOR | — | (无寄存器) | XOR 0xFFFFFFFF | **软件做** |
+
+**实际代码(~15 行,不是 1 行):**
+
+```rust
+// bootloader/src/crc.rs (~15 lines)
+use embassy_stm32::pac::CRC;
+
+pub fn crc32_init() {
+    let crc = unsafe { &*CRC::ptr() };
+    crc.cr().modify(|_, w| unsafe {
+        w.rev_in().bits(0b10)     // 字节级输入反转
+         .rev_out().set_bit()    // 输出反转
+        // POL、POLYSIZE、INIT 都用默认值,已经是 ISO-HDLC 配置
+    });
+}
+
+pub fn crc32_update(data: &[u8]) {
+    let crc = unsafe { &*CRC::ptr() };
+    for &b in data {
+        crc.dr().write(|w| unsafe { w.dr().bits(b as u32) });
+    }
+}
+
+pub fn crc32_finalize() -> u32 {
+    let crc = unsafe { &*CRC::ptr() };
+    // 外设没 final XOR,软件做
+    crc.dr().read().dr().bits() ^ 0xFFFF_FFFF
+}
+```
+
+**build.rs 端同步:** app 编译时也用 ISO-HDLC CRC32 算 image 末 4 字节。可用 `crc32fast` crate(`build-dependencies`),或调 Python `zlib.crc32()` 算后注入。
+
+**收益(对比手写表驱动软件 CRC32):**
+- `bootloader/crc.rs` 从 ~100 行降到 ~15 行(模块仍保留,只是瘦了)
+- 省 1KB flash(256 字节表 + 反转/移位代码)
+- 省 256 字节 RAM(CRC 表不放在 RAM)
+- 性能 0 损失(硬件 100KB ~ 0.5ms,软件 ~ 1ms)
+- 一致性:build.rs 与 bootloader 算同一种标准 CRC32,Python `zlib.crc32()` 可独立验证
 
 ## 错误处理
 
@@ -379,9 +428,13 @@ foc-common = { path = "common" }
 [dev-dependencies]
 # host-side 测试 flash 抽象
 embedded-storage-inmemory = "0.1"
+
+[build-dependencies]
+# build.rs 算 image CRC32(ISO-HDLC),写到 metadata 段
+crc32fast = "1"
 ```
 
-> **注意:** 没有 `[build-dependencies]` 块。`embassy-build` 这个 crate 在 crates.io 不存在,link script 通过 `build.rs` 里 `println!("cargo:rustc-link-arg-bins=...")` 直接打。
+> **注意:** 不引 `embassy-build` 这个 crate(crates.io 不存在)。link script 通过 `build.rs` 里 `println!("cargo:rustc-link-arg-bins=...")` 直接打。
 
 ### bootloader crate
 
