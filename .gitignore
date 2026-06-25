@@ -1,0 +1,17 @@
+# Build artifacts
+target/
+**/*.rs.bk
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Probe-rs / defmt
+*.elf
+*.bin
+*.hex
+
+# OS
+.DS_Store
+Thumbs.db
