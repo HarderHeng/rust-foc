@@ -16,10 +16,12 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(test, allow(unused_imports))]
 
+pub mod current_loop;
 pub mod pid;
 pub mod svpwm;
 pub mod transforms;
 
+pub use current_loop::{CurrentLoop, CurrentLoopConfig};
 pub use pid::{Pid, PidConfig};
 pub use svpwm::{svpwm, SvpwmDuty};
 pub use transforms::{
