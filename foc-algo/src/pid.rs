@@ -38,17 +38,17 @@ pub struct PidConfig {
     /// A one-pole filter is applied to the derivative term.  The time constant
     /// is `N × dt` so you don't need to know the actual loop frequency:
     ///
-    /// | `N` | Filter equation | Effect |
-    /// |-----|----------------|--------|
-    /// | `0` | α = 1          | No filtering (classical D) |
-    /// | `1` | α = 1/2        | Light smoothing |
-    /// | `3` | α = 1/4        | Moderate smoothing |
-    /// | `9` | α = 1/10       | Heavy smoothing |
+    /// | `N` | α       | Effect |
+    /// |-----|---------|--------|
+    /// | `0` | 1       | No filtering (classical D) |
+    /// | `1` | 1/2     | Light smoothing |
+    /// | `3` | 1/4     | Moderate smoothing |
+    /// | `9` | 1/10    | Heavy smoothing |
     ///
     /// Start with `3` if the motor whines or PWM noise feeds through the D term.
     /// Increase if the shaft still oscillates; decrease if the response feels
     /// sluggish.
-    pub d_filter_cycles: f32,
+    pub d_filter_cycles: u16,
 }
 
 impl Default for PidConfig {
@@ -58,7 +58,7 @@ impl Default for PidConfig {
             ki: 0.0,
             kd: 0.0,
             output_limit: f32::MAX,
-            d_filter_cycles: 0.0,
+            d_filter_cycles: 0,
         }
     }
 }
@@ -80,7 +80,7 @@ impl Default for PidConfig {
 /// let mut pid = Pid::new(PidConfig {
 ///     kp: 1.5, ki: 0.1, kd: 0.005,
 ///     output_limit: 12.0,
-///     d_filter_cycles: 0.0,
+///     d_filter_cycles: 0,
 /// });
 ///
 /// let u = pid.update(target, actual, dt);
@@ -143,8 +143,8 @@ impl Pid {
                 //   α = 1 / (1 + d_filter_cycles)
                 //
                 // When d_filter_cycles = 0, α = 1 (no filtering).
-                if self.cfg.d_filter_cycles > 0.0 {
-                    let alpha = 1.0 / (1.0 + self.cfg.d_filter_cycles);
+                if self.cfg.d_filter_cycles > 0 {
+                    let alpha = 1.0 / (1.0 + self.cfg.d_filter_cycles as f32);
                     self.d_state += alpha * (raw_diff - self.d_state);
                 } else {
                     self.d_state = raw_diff;
@@ -228,7 +228,7 @@ mod tests {
             ki: 0.0,
             kd: 0.0,
             output_limit: 100.0,
-            d_filter_cycles: 0.0,
+            d_filter_cycles: 0,
         });
         let u = pid.update(10.0, 8.0, 0.001);
         approx(u, 4.0); // 2.0 · (10 − 8) = 4.0
@@ -242,7 +242,7 @@ mod tests {
             ki: 1.0,
             kd: 0.0,
             output_limit: 100.0,
-            d_filter_cycles: 0.0,
+            d_filter_cycles: 0,
         });
         // Five updates with 1.0 error, each dt = 0.1 s
         // ∫ 1 dt = 0.1 per step → after 5 steps = 0.5
@@ -260,7 +260,7 @@ mod tests {
             ki: 0.0,
             kd: 5.0,
             output_limit: 100.0,
-            d_filter_cycles: 0.0,
+            d_filter_cycles: 0,
         });
         // First update: D is skipped (prev_measurement is None).
         pid.update(10.0, 8.0, 0.001);
@@ -277,7 +277,7 @@ mod tests {
             ki: 0.0,
             kd: 1.0,
             output_limit: 10_000.0,
-            d_filter_cycles: 0.0,
+            d_filter_cycles: 0,
         });
         // First update: D skipped (initialization).
         pid.update(0.0, 10.0, 0.01);
@@ -296,7 +296,7 @@ mod tests {
             ki: 0.0,
             kd: 0.0,
             output_limit: 10.0,
-            d_filter_cycles: 0.0,
+            d_filter_cycles: 0,
         });
         let u = pid.update(100.0, 0.0, 0.001);
         approx(u, 10.0); // clamped
@@ -311,7 +311,7 @@ mod tests {
             ki: 10.0,
             kd: 0.0,
             output_limit: 10.0, // saturation at ±10
-            d_filter_cycles: 0.0,
+            d_filter_cycles: 0,
         });
         // Large error saturates the output immediately.
         pid.update(100.0, 0.0, 1.0);
@@ -329,7 +329,7 @@ mod tests {
             ki: 0.1,
             kd: 0.0,
             output_limit: 100.0,
-            d_filter_cycles: 0.0,
+            d_filter_cycles: 0,
         });
         pid.update(10.0, 5.0, 0.1);
         assert!(pid.integral() > 0.0);
@@ -348,7 +348,7 @@ mod tests {
             ki: 0.0,
             kd: 0.0,
             output_limit: 100.0,
-            d_filter_cycles: 0.0,
+            d_filter_cycles: 0,
         });
         pid.set_gains(5.0, 0.0, 0.0);
         let u = pid.update(10.0, 8.0, 0.001);
@@ -364,7 +364,7 @@ mod tests {
             ki: 0.0,
             kd: 1.0,
             output_limit: 10_000.0,
-            d_filter_cycles: 9.0, // α = 1/10, heavy smoothing
+            d_filter_cycles: 9, // α = 1/10, heavy smoothing
         });
         // First update: D skipped (initialization).
         pid.update(0.0, 10.0, 0.001);
