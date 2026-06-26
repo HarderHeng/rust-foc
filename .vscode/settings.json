@@ -1,0 +1,33 @@
+{
+    // ── Rust-analyzer for embedded (no_std) ──────────────────────────────
+    //
+    // The .cargo/config.toml sets the default target, but rust-analyzer
+    // in a multi-crate workspace sometimes misses it.  Set it explicitly
+    // so that code navigation, completions, and inline type hints work
+    // correctly for the no_std target.
+    "rust-analyzer.cargo.target": "thumbv7em-none-eabihf",
+    "rust-analyzer.check.targets": ["thumbv7em-none-eabihf"],
+
+    // Don't check all targets (benches, tests, etc.) — they need std and
+    // won't compile for the embedded target.
+    "rust-analyzer.cargo.allTargets": false,
+
+    // ── Proc-macro expansion ────────────────────────────────────────────
+    // Show expanded proc macros inline (helps debug embedded-cli #[derive(Command)]
+    // and embassy macros).
+    "rust-analyzer.procMacro.enable": true,
+
+    // ── Diagnostics ─────────────────────────────────────────────────────
+    // Silence warnings about dead code / unused variables during active
+    // development.  Set to "true" (default) for strict mode.
+    "rust-analyzer.diagnostics.enable": true,
+
+    // ── Linked projects ─────────────────────────────────────────────────
+    // Ensure all workspace crates (including bootloader) are analysed.
+    "rust-analyzer.linkedProjects": [
+        "Cargo.toml",
+        "bootloader/Cargo.toml",
+        "common/Cargo.toml",
+        "foc-algo/Cargo.toml",
+    ],
+}

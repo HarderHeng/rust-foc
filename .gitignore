@@ -3,7 +3,6 @@ target/
 **/*.rs.bk
 
 # Editor
-.vscode/
 .idea/
 *.swp
 
