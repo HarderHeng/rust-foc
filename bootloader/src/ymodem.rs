@@ -6,6 +6,7 @@
 use crate::crc::{crc32_finalize, crc32_init, crc32_update};
 use crate::flash::{FlashError, Stm32g4Flash};
 use crate::uart::{uart_read_byte_timeout, uart_write_byte, uart_write_str};
+use embedded_storage::nor_flash::ReadNorFlash;
 use embedded_storage::nor_flash::NorFlash;
 use foc_common::{APP_END_ADDRESS, APP_START_ADDRESS};
 
