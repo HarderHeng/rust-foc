@@ -22,4 +22,11 @@ pub mod transforms;
 
 pub use pid::{Pid, PidConfig};
 pub use svpwm::{svpwm, SvpwmDuty};
-pub use transforms::{Abc, AlphaBeta, Dq, abc_to_dq, clark, clark_balanced, dq_to_abc, inv_clark, inv_park, park};
+pub use transforms::{
+    Abc, AlphaBeta, Dq, LibmTrig, Trig,
+    abc_to_dq, abc_to_dq_default,
+    clark, clark_balanced,
+    dq_to_abc, dq_to_abc_default,
+    inv_clark, inv_park, inv_park_default,
+    park, park_default,
+};
