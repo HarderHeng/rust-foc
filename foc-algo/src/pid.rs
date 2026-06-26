@@ -21,8 +21,8 @@
 
 /// PID controller configuration.
 ///
-/// Tune these gains and limits for the controlled plant.  All values can be
-/// changed at runtime via [`Pid::set_gains`] and [`Pid::set_limits`].
+/// Tune these gains and output limit for the controlled plant.  Values can be
+/// changed at runtime via [`Pid::set_gains`] and [`Pid::set_output_limit`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PidConfig {
     /// Proportional gain Kp.
@@ -33,8 +33,6 @@ pub struct PidConfig {
     pub kd: f32,
     /// Maximum absolute output value (symmetric clamping).
     pub output_limit: f32,
-    /// Maximum absolute integral term (anti-windup backstop).
-    pub integral_limit: f32,
 }
 
 impl Default for PidConfig {
@@ -44,7 +42,6 @@ impl Default for PidConfig {
             ki: 0.0,
             kd: 0.0,
             output_limit: f32::MAX,
-            integral_limit: f32::MAX,
         }
     }
 }
@@ -65,7 +62,7 @@ impl Default for PidConfig {
 /// ```ignore
 /// let mut pid = Pid::new(PidConfig {
 ///     kp: 1.5, ki: 0.1, kd: 0.005,
-///     output_limit: 12.0, integral_limit: 10.0,
+///     output_limit: 12.0,
 /// });
 ///
 /// let u = pid.update(target, actual, dt);
@@ -127,9 +124,6 @@ impl Pid {
         let raw = p + self.integral + d;
         if raw.abs() < self.cfg.output_limit {
             self.integral += self.cfg.ki * error * dt;
-            self.integral = self
-                .integral
-                .clamp(-self.cfg.integral_limit, self.cfg.integral_limit);
         }
 
         self.prev_measurement = Some(measurement);
@@ -154,11 +148,10 @@ impl Pid {
         self.cfg.kd = kd;
     }
 
-    /// Change output / integral limits at runtime.
+    /// Change output limit at runtime.
     #[inline]
-    pub fn set_limits(&mut self, output_limit: f32, integral_limit: f32) {
+    pub fn set_output_limit(&mut self, output_limit: f32) {
         self.cfg.output_limit = output_limit;
-        self.cfg.integral_limit = integral_limit;
     }
 
     // ── Read-only accessors ──
@@ -198,7 +191,6 @@ mod tests {
             ki: 0.0,
             kd: 0.0,
             output_limit: 100.0,
-            integral_limit: 100.0,
         });
         let u = pid.update(10.0, 8.0, 0.001);
         approx(u, 4.0); // 2.0 · (10 − 8) = 4.0
@@ -212,7 +204,6 @@ mod tests {
             ki: 1.0,
             kd: 0.0,
             output_limit: 100.0,
-            integral_limit: 100.0,
         });
         // Five updates with 1.0 error, each dt = 0.1 s
         // ∫ 1 dt = 0.1 per step → after 5 steps = 0.5
@@ -230,7 +221,6 @@ mod tests {
             ki: 0.0,
             kd: 5.0,
             output_limit: 100.0,
-            integral_limit: 100.0,
         });
         // First update: D is skipped (prev_measurement is None).
         pid.update(10.0, 8.0, 0.001);
@@ -247,7 +237,6 @@ mod tests {
             ki: 0.0,
             kd: 1.0,
             output_limit: 10_000.0,
-            integral_limit: 100.0,
         });
         // First update: D skipped (initialization).
         pid.update(0.0, 10.0, 0.01);
@@ -266,7 +255,6 @@ mod tests {
             ki: 0.0,
             kd: 0.0,
             output_limit: 10.0,
-            integral_limit: 100.0,
         });
         let u = pid.update(100.0, 0.0, 0.001);
         approx(u, 10.0); // clamped
@@ -281,7 +269,6 @@ mod tests {
             ki: 10.0,
             kd: 0.0,
             output_limit: 10.0, // saturation at ±10
-            integral_limit: 100.0,
         });
         // Large error saturates the output immediately.
         pid.update(100.0, 0.0, 1.0);
@@ -299,7 +286,6 @@ mod tests {
             ki: 0.1,
             kd: 0.0,
             output_limit: 100.0,
-            integral_limit: 100.0,
         });
         pid.update(10.0, 5.0, 0.1);
         assert!(pid.integral() > 0.0);
@@ -318,7 +304,6 @@ mod tests {
             ki: 0.0,
             kd: 0.0,
             output_limit: 100.0,
-            integral_limit: 100.0,
         });
         pid.set_gains(5.0, 0.0, 0.0);
         let u = pid.update(10.0, 8.0, 0.001);
