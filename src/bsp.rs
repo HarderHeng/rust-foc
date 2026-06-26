@@ -55,20 +55,10 @@ pub struct BoardHandles {
     pub debug_uart: DebugUartSink,
 }
 
-/// System clock configuration: HSE 8 MHz → PLL (×85 /4 = 170 MHz) → sysclk.
+/// System clock: HSE 8 MHz → PLL ×85 /4 = 170 MHz.
 ///
-/// B-G431B-ESC1 has an 8 MHz HSE crystal (X2). We use the HSE instead of the
-/// default HSI for better baud-rate precision (~50x more stable than HSI's
-/// ±1% RC tolerance). USART2 source clock is APB1 = sysclk / 4 = 42.5 MHz,
-/// which gives 921600 baud with <0.4% BRR error.
-///
-/// `boost: true` is required because sysclk = 170 MHz is above the 150 MHz
-/// threshold for the default voltage range (range1 needs Vcore boost to
-/// reach 170 MHz per RM0440 §7.4.3).
-///
-/// `divr: Some(DIV2)` is required by the embassy-stm32 G4 driver API when
-/// the PLL is the sysclk source; the R output is unused (we use PLL1_P),
-/// but the API insists on it.
+/// HSE chosen over HSI for stable baud rate (±1% HSI vs crystal).
+/// `boost: true` for sysclk > 150 MHz (RM0440 §7.4.3).
 pub fn clocks() -> HalConfig {
     let mut config = HalConfig::default();
     config.rcc.hsi = false;

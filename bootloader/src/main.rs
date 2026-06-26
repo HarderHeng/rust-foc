@@ -12,13 +12,9 @@ use foc_common::{
     APP_START_ADDRESS, APP_END_ADDRESS, FlashOtaFlag, OtaFlag, OtaState, OTA_FLAG_ADDRESS,
 };
 
-// Re-export the PAC so the linker retains the device crate's vector table.
 use embassy_stm32::pac as _;
-
 use crate::flash::Stm32g4Flash;
 
-/// Application entry point (called by bootloader when OTA flag is None or after
-/// successful OTA). Sets VTOR, sets MSP, jumps to app reset vector.
 #[inline(never)]
 unsafe fn jump_to_app() -> ! {
     cortex_m::interrupt::disable();
@@ -27,49 +23,27 @@ unsafe fn jump_to_app() -> ! {
     cortex_m::asm::bootload(APP_START_ADDRESS as *const u32)
 }
 
-/// Write a string to USART2 (PB3) using raw blocking TX. No defmt, no embassy driver.
-///
-/// USART2 on the B-G431B-ESC1 board uses pins PB3 (TX) and PB10 (RX). The
-/// peripheral must already be configured (by the bootloader, or left as the app
-/// configured it before reset).
-///
-/// The bootloader sets up clocks and USART2 via `embassy_stm32::init()` before
-/// calling this function, so the registers are accessible at their PAC addresses.
 fn uart_write_str(s: &str) {
     let usart = embassy_stm32::pac::USART2;
     for &b in s.as_bytes() {
         while !usart.isr().read().txe() {}
-        // SAFETY: Writing a byte to the TDR is safe; we own the peripheral and
-        // have exclusive access (single-threaded bootloader).
         usart.tdr().write(|w| w.set_dr(b as u16));
     }
-    // Wait for transmission complete so the last byte makes it out before
-    // any reset/sleep/etc.
     while !usart.isr().read().tc() {}
 }
 
-/// Read the OTA flag state using a temporary FlashOtaFlag borrowing flash.
 fn read_ota_flag(flash: &mut Stm32g4Flash) -> OtaState {
     FlashOtaFlag::new(flash, OTA_FLAG_ADDRESS).read()
 }
 
-/// Clear the OTA flag state using a temporary FlashOtaFlag borrowing flash.
 fn clear_ota_flag(flash: &mut Stm32g4Flash) -> Result<(), ()> {
-    FlashOtaFlag::new(flash, OTA_FLAG_ADDRESS)
-        .clear()
-        .map_err(|_| ())
+    FlashOtaFlag::new(flash, OTA_FLAG_ADDRESS).clear().map_err(|_| ())
 }
 
 #[entry]
 fn main() -> ! {
-    // ------------------------------------------------------------------
-    // Clock configuration: HSE 8 MHz + PLLN=85 + PLLR=4 => 170 MHz sysclk
-    //
-    // This MUST match the app's clock config so that USART2 uses the same
-    // baud rate divisor (170 MHz / 921600 = ~184.6). If the bootloader ran
-    // on HSI (16 MHz or 64 MHz), the baud rate would be computed differently
-    // and the terminal would receive garbage.
-    // ------------------------------------------------------------------
+    // Clock: HSE 8 MHz → PLL ×85 /4 → 170 MHz sysclk.
+    // MUST match the app's config — USART2 baud divisor (921600) depends on it.
     let mut config = embassy_stm32::Config::default();
     config.rcc.hsi = false;
     config.rcc.hse = Some(embassy_stm32::rcc::Hse {
@@ -94,56 +68,35 @@ fn main() -> ! {
 
     let mut flash = Stm32g4Flash::new();
 
-    // Read flag via a temporary borrow, then the borrow is released before
-    // we use flash for erase/write below.
     match read_ota_flag(&mut flash) {
-        OtaState::None => {
-            // Normal boot: jump to app.
-            unsafe { jump_to_app() }
-        }
+        OtaState::None => unsafe { jump_to_app() },
 
         OtaState::Pending => {
             uart_write_str("\n=== B-G431B-ESC1 OTA Bootloader ===\n");
             uart_write_str("Send y-modem (CRC mode) now... (timeout 30s)\n");
 
-            // Erase the entire app region (56 pages of 2 KB each).
             if let Err(_e) = flash.erase(APP_START_ADDRESS, APP_END_ADDRESS) {
-                uart_write_str("Erase failed; aborting\n");
-                // Stay in bootloader; user can power-cycle to retry.
-                loop {
-                    cortex_m::asm::wfi();
-                }
+                uart_write_str("Erase failed\n");
+                loop { cortex_m::asm::wfi(); }
             }
 
-            // Call the y-modem receive (stub in Task 4, full in Task 5).
-            let result = crate::ymodem::receive_image(&mut flash);
-
-            match result {
+            match crate::ymodem::receive_image(&mut flash) {
                 Ok(()) => {
-                    // y-modem complete — clear the flag and reset.
                     if clear_ota_flag(&mut flash).is_err() {
-                        uart_write_str("Flag clear failed; rebooting anyway\n");
+                        uart_write_str("Flag clear failed, rebooting anyway\n");
                     }
                     uart_write_str("OTA OK, rebooting...\n");
-                    // Brief delay so the message reaches the terminal.
-                    cortex_m::asm::delay(170_000_000 / 100); // ~10 ms at 170 MHz
+                    cortex_m::asm::delay(170_000_000 / 100);
                     cortex_m::peripheral::SCB::sys_reset();
                 }
                 Err(crate::ymodem::YmodemError::Timeout) => {
-                    // Spec: timeout clears flag so power-cycle returns to app.
                     let _ = clear_ota_flag(&mut flash);
                     uart_write_str("OTA timeout, power cycle to return to app\n");
-                    loop {
-                        cortex_m::asm::wfi();
-                    }
+                    loop { cortex_m::asm::wfi(); }
                 }
                 Err(_) => {
-                    // Other errors (CRC mismatch, abort, etc.): keep flag set,
-                    // so power-cycle resumes OTA (doesn't go back to app).
                     uart_write_str("OTA error; power cycle to retry\n");
-                    loop {
-                        cortex_m::asm::wfi();
-                    }
+                    loop { cortex_m::asm::wfi(); }
                 }
             }
         }
@@ -152,7 +105,5 @@ fn main() -> ! {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {
-        cortex_m::asm::wfi();
-    }
+    loop { cortex_m::asm::wfi(); }
 }

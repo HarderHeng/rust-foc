@@ -40,13 +40,9 @@ impl Stm32g4Flash {
         Self { _phantom: core::marker::PhantomData }
     }
 
-    /// Reference to the FLASH peripheral (pub const in the PAC).
     #[inline]
-    fn pac() -> pac::flash::Flash {
-        pac::FLASH
-    }
+    fn pac() -> pac::flash::Flash { pac::FLASH }
 
-    /// Unlock the flash control register.
     unsafe fn unlock() {
         let flash = Self::pac();
         while flash.sr().read().bsy() {}

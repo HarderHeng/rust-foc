@@ -41,16 +41,10 @@ impl Stm32g4Flash {
         Self { _phantom: core::marker::PhantomData }
     }
 
-    /// Reference to the FLASH peripheral (pub const in the PAC).
-    #[inline]
-    fn pac() -> pac::flash::Flash {
-        pac::FLASH
-    }
+        #[inline]
+    fn pac() -> pac::flash::Flash { pac::FLASH }
 
-    /// Unlock the flash control register.
-    ///
-    /// After reset, CR.LOCK is set. Writing key1 (0x4567_0123) then key2
-    /// (0xCDEF_89AB) to KEYR unlocks it.
+    /// Unlock flash: write key1 (0x4567_0123) then key2 (0xCDEF_89AB) to KEYR.
     unsafe fn unlock() {
         let flash = Self::pac();
         while flash.sr().read().bsy() {}

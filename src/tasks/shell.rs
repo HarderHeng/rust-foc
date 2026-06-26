@@ -17,16 +17,14 @@ use embedded_io_async::Read;
 use crate::commands::shell::{make_processor, ShellCommand};
 use crate::drivers::debug_uart::UsartError06;
 
-/// Buffer sizes for the embedded-cli line editor and history.
 const CMD_BUF_SIZE: usize = 64;
 const HIST_BUF_SIZE: usize = 128;
 
-// ---------------------------------------------------------------------------
-// V0.6 Write adapter for BufferedUartTx
-// ---------------------------------------------------------------------------
+// ── embedded-io v0.6 Write adapter for BufferedUartTx ──
+//
+// embedded-cli 0.2.1 uses embedded-io v0.6 internally, while embassy
+// implements v0.7.  This adapter bridges the two.
 
-/// Wraps a `BufferedUartTx<'static>` and implements `embedded-io` v0.6 `Write`,
-/// matching the trait version used by `embedded-cli` 0.2.1.
 struct TxWriter06 {
     inner: BufferedUartTx<'static>,
 }
@@ -37,9 +35,6 @@ impl eio06::ErrorType for TxWriter06 {
 
 impl eio06::Write for TxWriter06 {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        // Delegate to the v0.7 `embedded_io::Write` impl on BufferedUartTx.
-        // The fully-qualified call avoids ambiguity with the v0.6 trait we're
-        // implementing here.
         <BufferedUartTx<'_> as embedded_io::Write>::write(&mut self.inner, buf)
             .map_err(UsartError06::from)
     }
@@ -50,9 +45,7 @@ impl eio06::Write for TxWriter06 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shell task
-// ---------------------------------------------------------------------------
+// ── Shell task ──
 
 /// Async shell task.  Takes ownership of the TX and RX halves of the debug
 /// UART and runs an interactive command-line interface.

@@ -81,25 +81,14 @@ impl<U: embedded_io::Write> embedded_io::Write for Uart2Sink<U> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// embedded-io v0.6 adapter for embedded-cli compatibility
-//
-// `embedded-cli` 0.2.1 depends on `embedded-io` 0.6.x internally.  We
-// implement v0.6 traits on a separate newtype (`Uart2Sink06`) because the
-// Rust trait system treats v0.6 and v0.7 as different traits, and embassy's
-// `BufferedUart` only implements v0.7 `Write`.
-//
-// The v0.6 `Error` trait requires `kind() -> ErrorKind`, which embassy
-// `usart::Error` does not provide (it only has the v0.7 `Error` impl).
-// `UsartError06` bridges this gap.
-// ---------------------------------------------------------------------------
+// ── embedded-io v0.6 adapter for embedded-cli 0.2.1 ──
 
 use core::fmt;
 use embassy_stm32::usart::{BufferedUart, Error as UsartError};
 use embedded_io::Write as _;
 use embedded_io_06 as eio06;
 
-/// v0.6 `Error` wrapper around `embassy_stm32::usart::Error`.
+/// Wraps `embassy_stm32::usart::Error` into embedded-io v0.6's error trait.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UsartError06(UsartError);
 
