@@ -6,8 +6,6 @@
 //! u(t) = Kp·e(t) + Ki·∫e − Kd·dy/dt   (derivative on measurement)
 //! ```
 
-use core::f32;
-
 /// PID configuration.
 ///
 /// Gains and limits can be changed at runtime via [`Pid::set_gains`] and

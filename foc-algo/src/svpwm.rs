@@ -5,7 +5,6 @@
 //! Uses the max/min zero-sequence injection (centred SVM) to extend the
 //! linear modulation range to Vdc/√3 without distortion.
 
-
 /// Three-phase duty cycles for centre-aligned PWM.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SvpwmDuty {
@@ -32,13 +31,11 @@ pub fn svpwm(v_alpha: f32, v_beta: f32, vdc: f32) -> SvpwmDuty {
     }
 
     // ── 1. Inverse Clarke: αβ → raw phase voltages ──
-    //     Va = Vα
-    //     Vb = (-Vα + √3·Vβ) / 2
-    //     Vc = (-Vα − √3·Vβ) / 2
-    let r3 = 1.732_050_8; // √3
-    let va = v_alpha;
-    let vb = (-v_alpha + r3 * v_beta) * 0.5;
-    let vc = (-v_alpha - r3 * v_beta) * 0.5;
+    // Delegated to the shared transform so the math stays in one place.
+    let abc = crate::inv_clark(crate::AlphaBeta { alpha: v_alpha, beta: v_beta });
+    let va = abc.a;
+    let vb = abc.b;
+    let vc = abc.c;
 
     // ── 2. Max/min zero-sequence injection ──
     //     Voffset = −(Vmax + Vmin) / 2

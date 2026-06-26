@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! foc-rust ──→ foc-algo (pure math)
-//!             foc-algo ──→ (none — zero dependencies)
+//!             foc-algo ──→ libm (sin/cos for Park transforms)
 //! ```
 
 #![cfg_attr(not(test), no_std)]
