@@ -58,11 +58,17 @@ impl<F: NorFlash + ReadNorFlash> FlashOtaFlag<F> {
         Self { storage, addr }
     }
 
-    /// Read the raw flag byte (1 byte, may be 0x00 or 0xAA).
+    /// Read the raw flag byte.
+    ///
+    /// Must read at least `READ_SIZE` bytes (4 on STM32G4) to satisfy
+    /// `ReadNorFlash` alignment.  We read 8 bytes and return only the first;
+    /// the remaining bytes are padding.
     fn read_byte(&mut self) -> u8 {
-        let mut buf = [0u8; 1];
-        // Ignore error — a failed read returns 0x00 which is the safe default (None).
-        let _ = self.storage.read(self.addr, &mut buf);
+        let mut buf = [0u8; 8];
+        if self.storage.read(self.addr, &mut buf).is_err() {
+            // Failed read returns 0x00 (safe default = None).
+            return 0;
+        }
         buf[0]
     }
 }
@@ -85,8 +91,12 @@ impl<F: NorFlash + ReadNorFlash> OtaFlag for FlashOtaFlag<F> {
         self.storage
             .erase(page_start, page_start + PAGE_SIZE)
             .map_err(FlagError::Flash)?;
+
+        // Write WRITE_SIZE bytes (8 on STM32G4) so alignment passes.
+        // Only the first byte is the flag; the rest remain 0x00 (erased→None).
+        let write_buf = [OTA_FLAG_PENDING, 0, 0, 0, 0, 0, 0, 0];
         self.storage
-            .write(self.addr, &[OTA_FLAG_PENDING])
+            .write(self.addr, &write_buf)
             .map_err(FlagError::Flash)
     }
 
@@ -97,8 +107,11 @@ impl<F: NorFlash + ReadNorFlash> OtaFlag for FlashOtaFlag<F> {
         self.storage
             .erase(page_start, page_start + PAGE_SIZE)
             .map_err(FlagError::Flash)?;
+
+        // Write WRITE_SIZE bytes (8 on STM32G4) so alignment passes.
+        let write_buf = [OTA_FLAG_NONE, 0, 0, 0, 0, 0, 0, 0];
         self.storage
-            .write(self.addr, &[OTA_FLAG_NONE])
+            .write(self.addr, &write_buf)
             .map_err(FlagError::Flash)
     }
 }
