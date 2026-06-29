@@ -1,88 +1,134 @@
-//! Field-oriented current controller — pure math, no hardware deps.
+//! FOC controller — context-object style.
 //!
-//! Composes Clarke, Park, two PIDs, inverse Park, and SVPWM into one step:
+//! All state lives inside [`FocController`]. Callers mutate inputs via setters
+//! and step the loop with one call.  No long parameter lists per update.
 //!
-//! ```text
-//! Ia,Ib ─Clarke──→ Iα,Iβ ─Park(θ)──→ Id,Iq ─PID──→ Vd,Vq ─inv_Park(θ)──→ Vα,Vβ ─SVPWM──→ duties
+//! Typical usage:
+//! ```ignore
+//! let mut foc = FocController::new(cfg);
+//! loop {
+//!     foc.set_currents(ia, ib);             // from ADC
+//!     foc.set_target_torque(iq_target);     // from outer loop / user
+//!     foc.set_vdc(bus_voltage);             // from ADC
+//!     foc.update(theta, dt);                // runs full chain → SVPWM
+//!     let duty = foc.duty();                 // push to PWM hardware
+//! }
 //! ```
 
 use crate::pid::{Pid, PidConfig};
 use crate::svpwm::{svpwm, SvpwmDuty};
 use crate::transforms::{clark_balanced, inv_park, park, Trig};
 
-/// Current loop configuration.
-///
-/// D and Q axes typically need different gains (especially with salient
-/// PMSMs where Ld ≠ Lq).
-pub struct CurrentLoopConfig {
+/// Controller configuration.
+#[derive(Clone, Copy)]
+pub struct FocConfig {
     pub pid_d: PidConfig,
     pub pid_q: PidConfig,
+    /// DC bus voltage (V). Set once via [`FocController::set_vdc`] or directly.
+    pub vdc: f32,
 }
 
-/// FOC current controller.
-///
-/// Each `update()` runs the full chain from phase currents and rotor angle
-/// to PWM duty cycles.  No hidden state beyond the two PI accumulators.
-pub struct CurrentLoop {
+impl Default for FocConfig {
+    fn default() -> Self {
+        Self {
+            pid_d: PidConfig { kp: 0.0, ki: 0.0, kd: 0.0, output_limit: 12.0, d_filter_cycles: 0 },
+            pid_q: PidConfig { kp: 0.0, ki: 0.0, kd: 0.0, output_limit: 12.0, d_filter_cycles: 0 },
+            vdc: 24.0,
+        }
+    }
+}
+
+/// FOC controller with full internal state.
+pub struct FocController {
+    cfg: FocConfig,
     pid_d: Pid,
     pid_q: Pid,
+
+    // Inputs (last set by setters, consumed by update)
+    ia: f32,
+    ib: f32,
+    theta: f32,
+
+    // Targets
+    id_target: f32,
+    iq_target: f32,
+
+    // Output
+    duty: SvpwmDuty,
+    vd: f32,
+    vq: f32,
 }
 
-impl CurrentLoop {
-    pub fn new(cfg: CurrentLoopConfig) -> Self {
+impl FocController {
+    pub fn new(cfg: FocConfig) -> Self {
         Self {
+            cfg,
             pid_d: Pid::new(cfg.pid_d),
             pid_q: Pid::new(cfg.pid_q),
+            ia: 0.0, ib: 0.0, theta: 0.0,
+            id_target: 0.0, iq_target: 0.0,
+            duty: SvpwmDuty { ta: 0.5, tb: 0.5, tc: 0.5 },
+            vd: 0.0, vq: 0.0,
         }
     }
 
-    /// One control cycle.
-    ///
-    /// | Arg | Unit | Description |
-    /// |-----|------|-------------|
-    /// | `id_ref`, `iq_ref` | A | Target currents (from outer speed/torque loop) |
-    /// | `ia`, `ib` | A | Measured phase currents (ic is derived as -(ia+ib)) |
-    /// | `theta` | rad | Rotor electrical angle |
-    /// | `vdc` | V | DC bus voltage |
-    /// | `dt` | s | Time since last call |
-    ///
-    /// Returns SVPWM duty cycles in [0, 1].
-    pub fn update<T: Trig>(
-        &mut self,
-        trig: &T,
-        id_ref: f32,
-        iq_ref: f32,
-        ia: f32,
-        ib: f32,
-        theta: f32,
-        vdc: f32,
-        dt: f32,
-    ) -> SvpwmDuty {
-        // 1. Clarke: balanced Ia,Ib → stationary frame
-        let ab = clark_balanced(ia, ib);
+    // ── Setters (called by the application before each update) ──
 
-        // 2. Park: stationary → rotating frame
+    /// Set measured phase currents (A).  `Ic` is derived as `-(ia + ib)`.
+    pub fn set_currents(&mut self, ia: f32, ib: f32) {
+        self.ia = ia; self.ib = ib;
+    }
+
+    /// Set target currents (A) — typically from a torque / speed controller.
+    pub fn set_targets(&mut self, id: f32, iq: f32) {
+        self.id_target = id; self.iq_target = iq;
+    }
+
+    /// Set DC bus voltage (V).
+    pub fn set_vdc(&mut self, vdc: f32) { self.cfg.vdc = vdc; }
+
+    /// Set rotor electrical angle (rad) and step the controller.
+    ///
+    /// Combining the angle set with `update()` avoids the pitfall of using a
+    /// stale angle when the timer interrupt fires between two calls.
+    pub fn update<T: Trig>(&mut self, trig: &T, theta: f32, dt: f32) {
+        self.theta = theta;
+
+        // Clarke → Park
+        let ab = clark_balanced(self.ia, self.ib);
         let dq = park(trig, ab, theta);
 
-        // 3. PI on each axis
-        let vd = self.pid_d.update(id_ref, dq.d, dt);
-        let vq = self.pid_q.update(iq_ref, dq.q, dt);
+        // PI
+        self.vd = self.pid_d.update(self.id_target, dq.d, dt);
+        self.vq = self.pid_q.update(self.iq_target, dq.q, dt);
 
-        // 4. Inverse Park: rotating → stationary
-        let v_ab = inv_park(trig, crate::transforms::Dq { d: vd, q: vq }, theta);
+        // inv-Park → SVPWM
+        let v_ab = inv_park(trig, crate::transforms::Dq { d: self.vd, q: self.vq }, theta);
+        self.duty = svpwm(v_ab.alpha, v_ab.beta, self.cfg.vdc);
+    }
 
-        // 5. SVPWM: voltage vector → duty cycles
-        svpwm(v_ab.alpha, v_ab.beta, vdc)
+    // ── Accessors ──
+
+    /// Latest SVPWM duty cycles in [0, 1].
+    pub fn duty(&self) -> SvpwmDuty { self.duty }
+
+    /// Latest Id/Iq (post-Park, debug / logging).
+    pub fn idq(&self) -> (f32, f32) {
+        let ab = clark_balanced(self.ia, self.ib);
+        let dq = park(&crate::transforms::LibmTrig, ab, self.theta);
+        (dq.d, dq.q)
     }
 
     /// Reset both PI controllers.
     pub fn reset(&mut self) {
-        self.pid_d.reset();
-        self.pid_q.reset();
+        self.pid_d.reset(); self.pid_q.reset();
     }
 
-    pub fn pid_d(&self) -> &Pid { &self.pid_d }
-    pub fn pid_q(&self) -> &Pid { &self.pid_q }
+    /// Direct access to PI controllers for tuning.
+    pub fn pid_d(&mut self) -> &mut Pid { &mut self.pid_d }
+    pub fn pid_q(&mut self) -> &mut Pid { &mut self.pid_q }
+
+    pub fn config(&self) -> &FocConfig { &self.cfg }
 }
 
 // ---------------------------------------------------------------------------
@@ -95,64 +141,52 @@ mod tests {
     use crate::transforms::LibmTrig;
     static TRIG: LibmTrig = LibmTrig;
 
-    /// Zero currents, zero reference → 50 % duty on all phases.
     #[test]
-    fn zero_inputs_centre_output() {
-        let mut cl = CurrentLoop::new(CurrentLoopConfig {
-            pid_d: PidConfig { kp: 1.0, ki: 0.1, kd: 0.0, output_limit: 12.0, d_filter_cycles: 0 },
-            pid_q: PidConfig { kp: 1.0, ki: 0.1, kd: 0.0, output_limit: 12.0, d_filter_cycles: 0 },
-        });
-        let d = cl.update(&TRIG, 0.0, 0.0, 0.0, 0.0, 0.0, 24.0, 0.0001);
-        approx(d.ta, 0.5);
-        approx(d.tb, 0.5);
-        approx(d.tc, 0.5);
+    fn zero_state_centred_duty() {
+        let mut foc = FocController::new(FocConfig::default());
+        foc.update(&TRIG, 0.0, 0.0001);
+        approx(foc.duty().ta, 0.5);
+        approx(foc.duty().tb, 0.5);
+        approx(foc.duty().tc, 0.5);
     }
 
-    /// A non-zero Iq reference with matching measured current → steady output.
     #[test]
-    fn tracking_steady_state() {
-        let mut cl = CurrentLoop::new(CurrentLoopConfig {
-            pid_d: PidConfig { kp: 2.0, ki: 0.5, kd: 0.0, output_limit: 12.0, d_filter_cycles: 0 },
-            pid_q: PidConfig { kp: 2.0, ki: 0.5, kd: 0.0, output_limit: 12.0, d_filter_cycles: 0 },
-        });
-        // θ=0, Ia=1, Ib=-0.5 → Ic=-0.5 → Id=1, Iq=0
-        let d = cl.update(&TRIG, 1.0, 0.0, 1.0, -0.5, 0.0, 24.0, 0.0001);
-        // Error is 0 on both axes → output stays at 50% (integrator starts from 0)
-        approx(d.ta, 0.5);
-        approx(d.tb, 0.5);
-        approx(d.tc, 0.5);
+    fn update_consumes_latest_setters() {
+        // Set non-zero current before update.
+        let mut foc = FocController::new(FocConfig::default());
+        foc.set_currents(1.0, -0.5);
+        foc.update(&TRIG, 0.0, 0.0001);
+        // After update, idq() reflects what was measured.
+        let (d, q) = foc.idq();
+        approx(d, 1.0);
+        approx(q, 0.0);
     }
 
-    /// Step response: after several updates, the controller should drive
-    /// the output away from centre.
     #[test]
-    fn step_response_integrates() {
-        let mut cl = CurrentLoop::new(CurrentLoopConfig {
+    fn step_target_moves_duty() {
+        let mut foc = FocController::new(FocConfig {
             pid_d: PidConfig { kp: 1.0, ki: 0.1, kd: 0.0, output_limit: 12.0, d_filter_cycles: 0 },
             pid_q: PidConfig { kp: 1.0, ki: 0.1, kd: 0.0, output_limit: 12.0, d_filter_cycles: 0 },
+            vdc: 24.0,
         });
-        // Ten steps with Iq error = 1 A
-        for _ in 0..10 {
-            cl.update(&TRIG, 0.0, 1.0, 0.0, 0.0, 0.0, 24.0, 0.0001);
-        }
-        let d = cl.update(&TRIG, 0.0, 1.0, 0.0, 0.0, 0.0, 24.0, 0.0001);
-        // Output should have moved away from centre
+        foc.set_targets(0.0, 1.0);
+        for _ in 0..10 { foc.update(&TRIG, 0.0, 0.0001); }
+        let d = foc.duty();
         assert!(d.ta != 0.5 || d.tb != 0.5 || d.tc != 0.5);
     }
 
-    /// Reset clears the PI accumulators.
     #[test]
     fn reset_clears_integrators() {
-        let mut cl = CurrentLoop::new(CurrentLoopConfig {
+        let mut foc = FocController::new(FocConfig {
             pid_d: PidConfig { kp: 1.0, ki: 0.5, kd: 0.0, output_limit: 12.0, d_filter_cycles: 0 },
             pid_q: PidConfig { kp: 1.0, ki: 0.5, kd: 0.0, output_limit: 12.0, d_filter_cycles: 0 },
+            vdc: 24.0,
         });
-        for _ in 0..10 {
-            cl.update(&TRIG, 0.0, 1.0, 0.0, 0.0, 0.0, 24.0, 0.0001);
-        }
-        let before_iq = cl.pid_q().integral();
-        cl.reset();
-        assert!(cl.pid_q().integral().abs() < before_iq.abs());
+        foc.set_targets(0.0, 1.0);
+        for _ in 0..10 { foc.update(&TRIG, 0.0, 0.0001); }
+        let before = foc.pid_q().integral();
+        foc.reset();
+        assert!(foc.pid_q().integral().abs() < before.abs());
     }
 
     fn approx(a: f32, b: f32) {
