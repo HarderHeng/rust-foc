@@ -47,6 +47,7 @@
 
 use crate::current_loop_controller::CurrentLoopController;
 use crate::pid::Pid;
+use crate::position_loop_controller::PositionLoopController;
 use crate::speed_loop_controller::SpeedLoopController;
 use crate::transforms::Trig;
 
@@ -105,43 +106,8 @@ pub struct CascadeRuntime {
     pub vq: f32,
 }
 
-/// Position loop — simple P-only controller (extensible to PID later).
-///
-/// `omega_target = kp × (position_ref − position_measured)`
-///
-/// Lives inside `FocController`, but is only used when `mode == Position`.
-pub struct PositionController {
-    pub kp: f32,
-    pub output_limit: f32,
-    pub integral: f32,
-    pub ki: f32,
-    pub prev_measurement: Option<f32>,
-}
-
-impl Default for PositionController {
-    fn default() -> Self {
-        Self { kp: 0.0, ki: 0.0, output_limit: 100.0, integral: 0.0, prev_measurement: None }
-    }
-}
-
-impl PositionController {
-    /// One step.  Returns the speed setpoint.
-    pub fn update(&mut self, setpoint: f32, measurement: f32, dt: f32) -> f32 {
-        let error = setpoint - measurement;
-        let p = self.kp * error;
-        // Light I term to remove steady-state position error.
-        if p.abs() < self.output_limit {
-            self.integral += self.ki * error * dt;
-        }
-        let out = p + self.integral;
-        out.clamp(-self.output_limit, self.output_limit)
-    }
-
-    pub fn reset(&mut self) {
-        self.integral = 0.0;
-        self.prev_measurement = None;
-    }
-}
+/// Position loop — see `position_loop_controller` module.
+/// (Re-exported as `PositionLoopController` for convenience.)
 
 /// FOC controller with mode dispatch.
 pub struct FocController {
@@ -150,7 +116,7 @@ pub struct FocController {
     pub meas: CascadeMeasurements,
 
     /// Outer loops (only the one matching `mode` runs each cycle).
-    pub position: PositionController,
+    pub position: PositionLoopController,
     pub speed: SpeedLoopController,
 
     /// Inner loop — runs whenever `mode != Off`.  Application reads `duty`.
@@ -171,7 +137,7 @@ impl FocController {
             mode,
             target: ModeTarget::default(),
             meas: CascadeMeasurements::default(),
-            position: PositionController::default(),
+            position: PositionLoopController::default(),
             speed: SpeedLoopController::default(),
             current: CurrentLoopController::default(),
             runtime: CascadeRuntime::default(),
@@ -208,11 +174,12 @@ impl FocController {
 
             Mode::Position => {
                 // Position loop produces a speed reference; speed loop produces Iq.
-                let omega_ref = self.position.update(
-                    self.target.position,
-                    self.meas.position,
-                    dt,
-                );
+                self.position.meas.position = self.meas.position;
+                self.position.meas.velocity = self.meas.speed;
+                self.position.meas.accel = self.meas.accel;
+                self.position.target.position_ref = self.target.position;
+                self.position.update(dt);
+                let omega_ref = self.position.omega_ref;
                 self.runtime.speed_target = omega_ref;
                 self.speed.meas.speed = self.meas.speed;
                 self.speed.meas.accel = self.meas.accel;
@@ -250,8 +217,7 @@ impl FocController {
     pub fn current_pid_d(&mut self) -> &mut Pid { &mut self.current.pid_d }
     pub fn current_pid_q(&mut self) -> &mut Pid { &mut self.current.pid_q }
     pub fn speed_pid(&mut self) -> &mut Pid { &mut self.speed.pid }
-    pub fn position_kp(&mut self) -> &mut f32 { &mut self.position.kp }
-    pub fn position_ki(&mut self) -> &mut f32 { &mut self.position.ki }
+    pub fn position_pid(&mut self) -> &mut Pid { &mut self.position.pid }
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +277,7 @@ mod tests {
     #[test]
     fn position_mode_runs_both_loops() {
         let mut c = make_vdc(Mode::Position);
-        c.position.kp = 1.0;
+        c.position.pid.kp = 1.0;
         c.speed.pid.kp = 1.0;
         c.target.position = 1.0;     // 1 rad away
         c.meas.position = 0.0;
