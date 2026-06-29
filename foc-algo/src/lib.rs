@@ -24,8 +24,8 @@ pub mod speed_loop_controller;
 pub mod svpwm;
 pub mod transforms;
 
-pub use cascade::{Debug, FocController, Meas, Mode, Target};
-pub use current_loop_controller::{CurrentLoopController, Measurements, Runtime, Targets};
+pub use cascade::{FocController, Meas, Mode, Runtime, Target};
+pub use current_loop_controller::{AxisPid, CurrentLoop};
 pub use pid::Pid;
 pub use position_loop_controller::PositionLoopController;
 pub use speed_loop_controller::{SpeedLoopController, Feedforward as SpeedFeedforward};

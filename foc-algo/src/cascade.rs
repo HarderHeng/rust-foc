@@ -1,15 +1,19 @@
 //! FOC controller — mode dispatch over the cascade.
 //!
-//! | Mode       | Chain                                     | `target.*` field used |
-//! |------------|-------------------------------------------|------------------------|
-//! | `Off`      | none                                      | (none)                 |
-//! | `Torque`   | current                                   | `target.iq`            |
-//! | `Speed`    | speed → current                           | `target.speed_ref`     |
-//! | `Position` | position → speed → current                | `target.position`      |
+//! | Mode       | Chain                       | Reference field     |
+//! |------------|------------------------------|---------------------|
+//! | `Off`      | none                         | (none)              |
+//! | `Torque`   | current                      | `target.iq`         |
+//! | `Speed`    | speed → current              | `target.speed_ref`  |
+//! | `Position` | position → speed → current   | `target.position`   |
 //!
-//! Default mode is `Off`.  Current loop is never exposed.
+//! ## Field layers
+//!
+//! The controller owns ONE flat set of meas / target / runtime / duty fields.
+//! Inner loops (position, speed) are private and only expose their PID gains
+//! and feedforward through typed accessors for tuning.
 
-use crate::current_loop_controller::CurrentLoopController;
+use crate::current_loop_controller::CurrentLoop;
 use crate::pid::Pid;
 use crate::position_loop_controller::PositionLoopController;
 use crate::speed_loop_controller::SpeedLoopController;
@@ -17,18 +21,10 @@ use crate::svpwm::Duty;
 use crate::transforms::Trig;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Mode {
-    Off,
-    Torque,
-    Speed,
-    Position,
-}
+pub enum Mode { Off, Torque, Speed, Position }
 
-impl Default for Mode {
-    fn default() -> Self { Mode::Off }
-}
+impl Default for Mode { fn default() -> Self { Mode::Off } }
 
-/// Reference inputs.  Only the field matching `mode` is read.
 #[derive(Default, Clone, Copy)]
 pub struct Target {
     pub iq: f32,
@@ -37,7 +33,6 @@ pub struct Target {
     pub id_ref: f32,
 }
 
-/// Sensor inputs.
 #[derive(Default, Clone, Copy)]
 pub struct Meas {
     pub position: f32,
@@ -49,30 +44,24 @@ pub struct Meas {
     pub vdc: f32,
 }
 
-/// Debug-only output values.
 #[derive(Default, Clone, Copy)]
-pub struct Debug {
+pub struct Runtime {
     pub iq_target: f32,
     pub speed_target: f32,
-    pub id_measured: f32,
-    pub iq_measured: f32,
-    pub vd: f32,
-    pub vq: f32,
 }
 
 pub struct FocController {
     pub mode: Mode,
     pub target: Target,
     pub meas: Meas,
-    pub position: PositionLoopController,
-    pub speed: SpeedLoopController,
-    pub current: CurrentLoopController,
-    pub debug: Debug,
+    pub runtime: Runtime,
+    pub duty: Duty,
+    position: PositionLoopController,
+    speed: SpeedLoopController,
+    current: CurrentLoop,
 }
 
-impl Default for FocController {
-    fn default() -> Self { Self::new(Mode::Off) }
-}
+impl Default for FocController { fn default() -> Self { Self::new(Mode::Off) } }
 
 impl FocController {
     pub fn new(mode: Mode) -> Self {
@@ -80,88 +69,79 @@ impl FocController {
             mode,
             target: Target::default(),
             meas: Meas::default(),
+            runtime: Runtime::default(),
+            duty: Duty::default(),
             position: PositionLoopController::default(),
             speed: SpeedLoopController::default(),
-            current: CurrentLoopController::default(),
-            debug: Debug::default(),
+            current: CurrentLoop::new(),
         }
     }
 
-    /// Run one control cycle.  Reads `target` + `meas`, writes `current.duty`
-    /// and `debug`.
+    /// One control cycle.  Picks the chain based on `mode`, then runs the
+    /// current loop to update `self.duty`.
     pub fn update<T: Trig>(&mut self, dt: f32) {
-        let iq_target = match self.mode {
-            Mode::Off => {
-                self.current.duty = Duty { ta: 0.0, tb: 0.0, tc: 0.0 };
-                self.debug.iq_target = 0.0;
-                self.debug.speed_target = 0.0;
-                return;
+        if self.mode == Mode::Off {
+            self.runtime.iq_target = 0.0;
+            self.runtime.speed_target = 0.0;
+            self.duty = Duty { ta: 0.0, tb: 0.0, tc: 0.0 };
+            return;
+        }
+
+        let (iq_target, speed_target) = match self.mode {
+            Mode::Off => unreachable!(),  // handled above
+            Mode::Torque => (self.target.iq, 0.0),
+            Mode::Speed => {
+                self.speed.meas.speed = self.meas.speed;
+                self.speed.meas.accel = self.meas.accel;
+                self.speed.target.speed_ref = self.target.speed_ref;
+                self.speed.update(dt);
+                (self.speed.iq_target, self.target.speed_ref)
             }
-            Mode::Torque => {
-                self.debug.speed_target = 0.0;
-                self.target.iq
+            Mode::Position => {
+                self.position.meas.position = self.meas.position;
+                self.position.meas.velocity = self.meas.speed;
+                self.position.meas.accel = self.meas.accel;
+                self.position.target.position_ref = self.target.position;
+                self.position.update(dt);
+                let omega_ref = self.position.omega_ref;
+                self.speed.meas.speed = self.meas.speed;
+                self.speed.meas.accel = self.meas.accel;
+                self.speed.target.speed_ref = omega_ref;
+                self.speed.update(dt);
+                (self.speed.iq_target, omega_ref)
             }
-            Mode::Speed => self.run_speed(dt),
-            Mode::Position => self.run_position(dt),
         };
-        self.debug.iq_target = iq_target;
-        self.copy_meas_to_current();
-        self.current.target.iq = iq_target;
-        self.current.target.id = self.target.id_ref;
-        self.current.update::<T>(dt);
-        let r = &self.current.runtime;
-        self.debug.id_measured = r.id_measured;
-        self.debug.iq_measured = r.iq_measured;
-        self.debug.vd = r.vd;
-        self.debug.vq = r.vq;
+        self.runtime.iq_target = iq_target;
+        self.runtime.speed_target = speed_target;
+
+        self.duty = self.current.update::<T>(
+            self.meas.ia, self.meas.ib, self.meas.theta,
+            self.target.id_ref, iq_target,
+            dt,
+        );
     }
 
     pub fn reset(&mut self) {
         self.position.reset();
         self.speed.reset();
-        self.current.reset();
+        self.current.d.pid.reset();
+        self.current.q.pid.reset();
     }
 
-    pub fn current_pid_d(&mut self) -> &mut Pid { &mut self.current.pid_d }
-    pub fn current_pid_q(&mut self) -> &mut Pid { &mut self.current.pid_q }
-    pub fn speed_pid(&mut self) -> &mut Pid { &mut self.speed.pid }
+    // ── Tuning accessors ──
+
     pub fn position_pid(&mut self) -> &mut Pid { &mut self.position.pid }
-
-    fn run_speed(&mut self, dt: f32) -> f32 {
-        self.speed.meas.speed = self.meas.speed;
-        self.speed.meas.accel = self.meas.accel;
-        self.speed.target.speed_ref = self.target.speed_ref;
-        self.speed.update(dt);
-        self.debug.speed_target = self.target.speed_ref;
-        self.speed.iq_target
+    pub fn position_feedforward(&mut self) -> &mut crate::position_loop_controller::Feedforward {
+        &mut self.position.feedforward
     }
-
-    fn run_position(&mut self, dt: f32) -> f32 {
-        self.position.meas.position = self.meas.position;
-        self.position.meas.velocity = self.meas.speed;
-        self.position.meas.accel = self.meas.accel;
-        self.position.target.position_ref = self.target.position;
-        self.position.update(dt);
-        let omega_ref = self.position.omega_ref;
-        self.debug.speed_target = omega_ref;
-        self.speed.meas.speed = self.meas.speed;
-        self.speed.meas.accel = self.meas.accel;
-        self.speed.target.speed_ref = omega_ref;
-        self.speed.update(dt);
-        self.speed.iq_target
+    pub fn speed_pid(&mut self) -> &mut Pid { &mut self.speed.pid }
+    pub fn speed_feedforward(&mut self) -> &mut crate::speed_loop_controller::Feedforward {
+        &mut self.speed.feedforward
     }
-
-    fn copy_meas_to_current(&mut self) {
-        self.current.meas.ia = self.meas.ia;
-        self.current.meas.ib = self.meas.ib;
-        self.current.meas.theta = self.meas.theta;
-        self.current.svpwm.vdc = self.meas.vdc;
-    }
+    pub fn current_pid_d(&mut self) -> &mut Pid { &mut self.current.d.pid }
+    pub fn current_pid_q(&mut self) -> &mut Pid { &mut self.current.q.pid }
+    pub fn current_vdc(&mut self) -> &mut f32 { &mut self.current.svpwm.vdc }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -181,44 +161,44 @@ mod tests {
     #[test] fn off_mode_zero_duty() {
         let mut c = make(Mode::Off);
         c.update::<LibmTrig>(0.0001);
-        approx(c.current.duty.ta, 0.0);
-        approx(c.debug.iq_target, 0.0);
+        approx(c.duty.ta, 0.0);
+        approx(c.runtime.iq_target, 0.0);
     }
 
     #[test] fn torque_mode_passes_iq() {
         let mut c = make(Mode::Torque);
         c.target.iq = 1.5;
         c.update::<LibmTrig>(0.0001);
-        approx(c.debug.iq_target, 1.5);
+        approx(c.runtime.iq_target, 1.5);
     }
 
     #[test] fn speed_mode_runs_speed_loop() {
         let mut c = make(Mode::Speed);
-        c.speed.pid.kp = 1.0;
+        c.speed_pid().kp = 1.0;
         c.target.speed_ref = 2.0;
         c.update::<LibmTrig>(0.0001);
-        approx(c.debug.iq_target, 2.0);
+        approx(c.runtime.iq_target, 2.0);
     }
 
     #[test] fn position_mode_runs_both_loops() {
         let mut c = make(Mode::Position);
-        c.position.pid.kp = 1.0;
-        c.speed.pid.kp = 1.0;
+        c.position_pid().kp = 1.0;
+        c.speed_pid().kp = 1.0;
         c.target.position = 1.0;
         c.update::<LibmTrig>(0.0001);
-        approx(c.debug.speed_target, 1.0);
-        approx(c.debug.iq_target, 1.0);
+        approx(c.runtime.speed_target, 1.0);
+        approx(c.runtime.iq_target, 1.0);
     }
 
     #[test] fn mode_can_be_switched() {
         let mut c = make(Mode::Speed);
-        c.speed.pid.kp = 1.0;
+        c.speed_pid().kp = 1.0;
         c.target.speed_ref = 2.0;
         c.update::<LibmTrig>(0.0001);
-        approx(c.debug.iq_target, 2.0);
+        approx(c.runtime.iq_target, 2.0);
         c.mode = Mode::Off;
         c.update::<LibmTrig>(0.0001);
-        approx(c.debug.iq_target, 0.0);
+        approx(c.duty.ta, 0.0);
     }
 
     fn approx(a: f32, b: f32) {
