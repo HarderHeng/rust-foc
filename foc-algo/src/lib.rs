@@ -16,12 +16,12 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(test, allow(unused_imports))]
 
-pub mod current_loop;
+pub mod current_loop_controller;
 pub mod pid;
 pub mod svpwm;
 pub mod transforms;
 
-pub use current_loop::{FocController, Measurements, Runtime, Targets};
+pub use current_loop_controller::{CurrentLoopController, Measurements, Runtime, Targets};
 pub use pid::Pid;
 pub use svpwm::{Duty, Svpwm};
 pub use transforms::{

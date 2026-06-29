@@ -1,4 +1,4 @@
-//! FOC controller — context-object with explicit field layering.
+//! Current loop controller — context-object with explicit field layering.
 //!
 //! ## Field layers
 //!
@@ -14,17 +14,17 @@
 //! ## Usage
 //!
 //! ```ignore
-//! let mut foc = FocController::new();
+//! let mut loop = CurrentLoopController::new();
 //!
 //! loop {
-//!     foc.meas.ia = adc.read_a();
-//!     foc.meas.ib = adc.read_b();
-//!     foc.meas.theta = encoder.angle();
-//!     foc.target.iq = torque_request;
+//!     loop.meas.ia = adc.read_a();
+//!     loop.meas.ib = adc.read_b();
+//!     loop.meas.theta = encoder.angle();
+//!     loop.target.iq = torque_request;
 //!
-//!     foc.update(&trig, dt);
+//!     loop.update(&trig, dt);
 //!
-//!     pwm.set(foc.duty);
+//!     pwm.set(loop.duty);
 //! }
 //! ```
 
@@ -40,7 +40,7 @@ pub struct Measurements {
     pub theta: f32,
 }
 
-/// Reference inputs to the current loop (typically from a speed/torque loop).
+/// Reference inputs (typically from a speed/torque outer loop).
 #[derive(Default, Clone, Copy)]
 pub struct Targets {
     pub id: f32,
@@ -56,8 +56,8 @@ pub struct Runtime {
     pub vq: f32,
 }
 
-/// FOC current controller. All state lives here.
-pub struct FocController {
+/// Current loop controller — runs Clarke → Park → two PIs → inv-Park → SVPWM.
+pub struct CurrentLoopController {
     pub pid_d: Pid,
     pub pid_q: Pid,
     pub svpwm: Svpwm,
@@ -68,7 +68,7 @@ pub struct FocController {
     pub duty: Duty,
 }
 
-impl Default for FocController {
+impl Default for CurrentLoopController {
     fn default() -> Self {
         let mut svpwm = Svpwm::new(24.0);
         svpwm.duty = Duty { ta: 0.5, tb: 0.5, tc: 0.5 };
@@ -84,9 +84,9 @@ impl Default for FocController {
     }
 }
 
-impl FocController {
-    /// Run one control cycle.  Reads `self.meas` and `self.target`, writes
-    /// `self.runtime` and `self.duty`.
+impl CurrentLoopController {
+    /// Run one current-loop cycle.  Reads `self.meas` and `self.target`,
+    /// writes `self.runtime` and `self.duty`.
     pub fn update<T: Trig>(&mut self, dt: f32) {
         let ab = clark_balanced(self.meas.ia, self.meas.ib);
         let dq = park::<T>(ab, self.meas.theta);
@@ -120,52 +120,52 @@ mod tests {
 
     #[test]
     fn zero_state_centred_duty() {
-        let mut foc = FocController::default();
-        foc.update::<LibmTrig>(0.0001);
-        approx(foc.duty.ta, 0.5);
-        approx(foc.duty.tb, 0.5);
-        approx(foc.duty.tc, 0.5);
+        let mut loop_ = CurrentLoopController::default();
+        loop_.update::<LibmTrig>(0.0001);
+        approx(loop_.duty.ta, 0.5);
+        approx(loop_.duty.tb, 0.5);
+        approx(loop_.duty.tc, 0.5);
     }
 
     #[test]
     fn runtime_reflects_measurements() {
-        let mut foc = FocController::default();
-        foc.meas.ia = 1.0;
-        foc.meas.ib = -0.5;
-        foc.meas.theta = 0.0;
-        foc.update::<LibmTrig>(0.0001);
-        approx(foc.runtime.id_measured, 1.0);
-        approx(foc.runtime.iq_measured, 0.0);
+        let mut loop_ = CurrentLoopController::default();
+        loop_.meas.ia = 1.0;
+        loop_.meas.ib = -0.5;
+        loop_.meas.theta = 0.0;
+        loop_.update::<LibmTrig>(0.0001);
+        approx(loop_.runtime.id_measured, 1.0);
+        approx(loop_.runtime.iq_measured, 0.0);
     }
 
     #[test]
     fn step_target_moves_duty() {
-        let mut foc = FocController::default();
-        foc.pid_d.kp = 1.0; foc.pid_d.ki = 0.1;
-        foc.pid_q.kp = 1.0; foc.pid_q.ki = 0.1;
-        foc.target.iq = 1.0;
-        for _ in 0..10 { foc.update::<LibmTrig>(0.0001); }
-        assert!(foc.duty.ta != 0.5 || foc.duty.tb != 0.5 || foc.duty.tc != 0.5);
+        let mut loop_ = CurrentLoopController::default();
+        loop_.pid_d.kp = 1.0; loop_.pid_d.ki = 0.1;
+        loop_.pid_q.kp = 1.0; loop_.pid_q.ki = 0.1;
+        loop_.target.iq = 1.0;
+        for _ in 0..10 { loop_.update::<LibmTrig>(0.0001); }
+        assert!(loop_.duty.ta != 0.5 || loop_.duty.tb != 0.5 || loop_.duty.tc != 0.5);
     }
 
     #[test]
     fn reset_clears_integrators() {
-        let mut foc = FocController::default();
-        foc.pid_d.kp = 1.0; foc.pid_d.ki = 0.5;
-        foc.pid_q.kp = 1.0; foc.pid_q.ki = 0.5;
-        foc.target.iq = 1.0;
-        for _ in 0..10 { foc.update::<LibmTrig>(0.0001); }
-        let before = foc.pid_q.integral;
-        foc.reset();
-        assert!(foc.pid_q.integral.abs() < before.abs());
+        let mut loop_ = CurrentLoopController::default();
+        loop_.pid_d.kp = 1.0; loop_.pid_d.ki = 0.5;
+        loop_.pid_q.kp = 1.0; loop_.pid_q.ki = 0.5;
+        loop_.target.iq = 1.0;
+        for _ in 0..10 { loop_.update::<LibmTrig>(0.0001); }
+        let before = loop_.pid_q.integral;
+        loop_.reset();
+        assert!(loop_.pid_q.integral.abs() < before.abs());
     }
 
     #[test]
     fn vdc_zero_safe_output() {
-        let mut foc = FocController::default();
-        foc.svpwm.vdc = 0.0;
-        foc.update::<LibmTrig>(0.0001);
-        approx(foc.duty.ta, 0.0);
+        let mut loop_ = CurrentLoopController::default();
+        loop_.svpwm.vdc = 0.0;
+        loop_.update::<LibmTrig>(0.0001);
+        approx(loop_.duty.ta, 0.0);
     }
 
     fn approx(a: f32, b: f32) {
