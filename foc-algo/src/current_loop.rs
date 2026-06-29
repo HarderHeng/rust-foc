@@ -1,106 +1,44 @@
 //! FOC controller — context-object with explicit field layering.
 //!
-//! ## Field layers (who writes, who reads)
+//! ## Field layers
 //!
-//! | Layer | Type | Owner | Lifetime |
-//! |-------|------|-------|----------|
-//! | `config` | [`FocConfig`] | **Application** writes once at init | Immutable after `new()` |
-//! | `meas` | [`Measurements`] | **Application** writes per cycle (from ADC/sensor) | Per-cycle, overwritable |
-//! | `target` | [`Targets`] | **Application** writes per cycle (from outer loop) | Per-cycle, overwritable |
-//! | `runtime` | [`Runtime`] | **Controller** writes per cycle | Per-cycle, debug-only reads |
-//! | `output` | [`Outputs`] | **Controller** writes per cycle | Per-cycle, app reads |
+//! | Layer | Type | Owner |
+//! |-------|------|-------|
+//! | `pid_d`, `pid_q` | [`Pid`] | controller owns state, app writes gains |
+//! | `svpwm` | [`Svpwm`] | controller owns, app writes `vdc` |
+//! | `meas` | [`Measurements`] | application writes per cycle |
+//! | `target` | [`Targets`] | application writes per cycle |
+//! | `runtime` | [`Runtime`] | controller writes per cycle (debug-visible) |
+//! | `duty` | [`Duty`] | controller writes per cycle |
 //!
 //! ## Usage
 //!
 //! ```ignore
-//! let mut foc = FocController::new(FocConfig::default());
+//! let mut foc = FocController::new();
 //!
 //! loop {
-//!     // Application writes inputs:
 //!     foc.meas.ia = adc.read_a();
 //!     foc.meas.ib = adc.read_b();
 //!     foc.meas.theta = encoder.angle();
-//!     foc.meas.vdc = adc.read_vbus();
-//!     foc.target.iq = outer_loop.torque_request();
+//!     foc.target.iq = torque_request;
 //!
-//!     // Controller runs:
 //!     foc.update(&trig, dt);
 //!
-//!     // Application reads outputs:
-//!     let duty = foc.output.duty;
-//!     pwm.set(duty.ta, duty.tb, duty.tc);
+//!     pwm.set(foc.duty);
 //! }
 //! ```
 
-use crate::pid::{Pid, PidConfig};
-use crate::svpwm::{svpwm, SvpwmDuty};
+use crate::pid::Pid;
+use crate::svpwm::{Duty, Svpwm};
 use crate::transforms::{clark_balanced, inv_park, park, Trig};
 
-// ── Configuration (immutable after init) ─────────────────────────────────
-
-/// Per-axis PI configuration. Set once at startup.
-#[derive(Clone, Copy)]
-pub struct AxisPidConfig {
-    pub kp: f32,
-    pub ki: f32,
-    pub kd: f32,
-    pub output_limit: f32,
-    pub d_filter_cycles: u16,
-}
-
-impl AxisPidConfig {
-    pub fn as_pid_config(&self) -> PidConfig {
-        PidConfig {
-            kp: self.kp,
-            ki: self.ki,
-            kd: self.kd,
-            output_limit: self.output_limit,
-            d_filter_cycles: self.d_filter_cycles,
-        }
-    }
-}
-
-impl Default for AxisPidConfig {
-    fn default() -> Self {
-        Self { kp: 0.0, ki: 0.0, kd: 0.0, output_limit: 12.0, d_filter_cycles: 0 }
-    }
-}
-
-/// Top-level controller configuration. Application writes once.
-#[derive(Clone, Copy)]
-pub struct FocConfig {
-    pub pid_d: AxisPidConfig,
-    pub pid_q: AxisPidConfig,
-    /// Default DC bus voltage (overridable per cycle via [`Measurements::vdc`]).
-    pub vdc_default: f32,
-}
-
-impl Default for FocConfig {
-    fn default() -> Self {
-        Self {
-            pid_d: AxisPidConfig::default(),
-            pid_q: AxisPidConfig::default(),
-            vdc_default: 24.0,
-        }
-    }
-}
-
-// ── Measurements (application writes, controller reads) ────────────────
-
-/// Sensor readings, supplied by the application each cycle.
+/// Sensor readings supplied by the application each cycle.
 #[derive(Default, Clone, Copy)]
 pub struct Measurements {
-    /// Phase A current (A).
     pub ia: f32,
-    /// Phase B current (A).
     pub ib: f32,
-    /// Rotor electrical angle (rad).
     pub theta: f32,
-    /// DC bus voltage (V). If left at 0, falls back to `FocConfig::vdc_default`.
-    pub vdc: f32,
 }
-
-// ── Targets (application writes, controller reads) ──────────────────────
 
 /// Reference inputs to the current loop (typically from a speed/torque loop).
 #[derive(Default, Clone, Copy)]
@@ -109,10 +47,7 @@ pub struct Targets {
     pub iq: f32,
 }
 
-// ── Runtime state (controller owns, debug-visible) ──────────────────────
-
-/// Intermediate values that the controller computes each cycle.
-/// Read-only for the application — useful for logging, VOFA, debug.
+/// Intermediate values for logging / VOFA / debug.
 #[derive(Default, Clone, Copy)]
 pub struct Runtime {
     pub id_measured: f32,
@@ -121,53 +56,40 @@ pub struct Runtime {
     pub vq: f32,
 }
 
-// ── Outputs (controller writes, application reads) ──────────────────────
-
-/// Final outputs to the application (PWM duty cycles).
-#[derive(Clone, Copy)]
-pub struct Outputs {
-    pub duty: SvpwmDuty,
-}
-
-impl Default for Outputs {
-    fn default() -> Self { Self { duty: SvpwmDuty { ta: 0.5, tb: 0.5, tc: 0.5 } } }
-}
-
-// ── Controller ─────────────────────────────────────────────────────────
-
+/// FOC current controller. All state lives here.
 pub struct FocController {
-    config: FocConfig,
-    pid_d: Pid,
-    pid_q: Pid,
+    pub pid_d: Pid,
+    pub pid_q: Pid,
+    pub svpwm: Svpwm,
+
     pub meas: Measurements,
     pub target: Targets,
     pub runtime: Runtime,
-    pub output: Outputs,
+    pub duty: Duty,
 }
 
-impl FocController {
-    pub fn new(config: FocConfig) -> Self {
+impl Default for FocController {
+    fn default() -> Self {
+        let mut svpwm = Svpwm::new(24.0);
+        svpwm.duty = Duty { ta: 0.5, tb: 0.5, tc: 0.5 };
         Self {
-            pid_d: Pid::new(config.pid_d.as_pid_config()),
-            pid_q: Pid::new(config.pid_q.as_pid_config()),
-            config,
+            pid_d: Pid::new(),
+            pid_q: Pid::new(),
+            svpwm,
             meas: Measurements::default(),
             target: Targets::default(),
             runtime: Runtime::default(),
-            output: Outputs::default(),
+            duty: Duty { ta: 0.5, tb: 0.5, tc: 0.5 },
         }
     }
+}
 
-    /// Run one control cycle.
-    ///
-    /// Reads `self.meas` and `self.target`, writes `self.output.duty` and
-    /// `self.runtime`. Callers can then read both freely.
-    pub fn update<T: Trig>(&mut self, trig: &T, dt: f32) {
-        let vdc = if self.meas.vdc > 0.0 { self.meas.vdc } else { self.config.vdc_default };
-
+impl FocController {
+    /// Run one control cycle.  Reads `self.meas` and `self.target`, writes
+    /// `self.runtime` and `self.duty`.
+    pub fn update<T: Trig>(&mut self, dt: f32) {
         let ab = clark_balanced(self.meas.ia, self.meas.ib);
-        let dq = park(trig, ab, self.meas.theta);
-
+        let dq = park::<T>(ab, self.meas.theta);
         self.runtime.id_measured = dq.d;
         self.runtime.iq_measured = dq.q;
 
@@ -176,19 +98,15 @@ impl FocController {
         self.runtime.vd = vd;
         self.runtime.vq = vq;
 
-        let v_ab = inv_park(trig, crate::transforms::Dq { d: vd, q: vq }, self.meas.theta);
-        self.output.duty = svpwm(v_ab.alpha, v_ab.beta, vdc);
+        let v_ab = inv_park::<T>(crate::transforms::Dq { d: vd, q: vq }, self.meas.theta);
+        self.svpwm.update(v_ab.alpha, v_ab.beta);
+        self.duty = self.svpwm.duty;
     }
 
     pub fn reset(&mut self) {
-        self.pid_d.reset(); self.pid_q.reset();
+        self.pid_d.reset();
+        self.pid_q.reset();
     }
-
-    /// Mutate gains at runtime (rarely needed — usually rebuild with `new`).
-    pub fn pid_d_mut(&mut self) -> &mut Pid { &mut self.pid_d }
-    pub fn pid_q_mut(&mut self) -> &mut Pid { &mut self.pid_q }
-
-    pub fn config(&self) -> &FocConfig { &self.config }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,65 +117,55 @@ impl FocController {
 mod tests {
     use super::*;
     use crate::transforms::LibmTrig;
-    static TRIG: LibmTrig = LibmTrig;
 
     #[test]
     fn zero_state_centred_duty() {
-        let mut foc = FocController::new(FocConfig::default());
-        foc.update(&TRIG, 0.0001);
-        approx(foc.output.duty.ta, 0.5);
-        approx(foc.output.duty.tb, 0.5);
-        approx(foc.output.duty.tc, 0.5);
+        let mut foc = FocController::default();
+        foc.update::<LibmTrig>(0.0001);
+        approx(foc.duty.ta, 0.5);
+        approx(foc.duty.tb, 0.5);
+        approx(foc.duty.tc, 0.5);
     }
 
     #[test]
     fn runtime_reflects_measurements() {
-        let mut foc = FocController::new(FocConfig::default());
+        let mut foc = FocController::default();
         foc.meas.ia = 1.0;
         foc.meas.ib = -0.5;
         foc.meas.theta = 0.0;
-        foc.update(&TRIG, 0.0001);
+        foc.update::<LibmTrig>(0.0001);
         approx(foc.runtime.id_measured, 1.0);
         approx(foc.runtime.iq_measured, 0.0);
     }
 
     #[test]
     fn step_target_moves_duty() {
-        let cfg = FocConfig {
-            pid_d: AxisPidConfig { kp: 1.0, ki: 0.1, ..AxisPidConfig::default() },
-            pid_q: AxisPidConfig { kp: 1.0, ki: 0.1, ..AxisPidConfig::default() },
-            ..FocConfig::default()
-        };
-        let mut foc = FocController::new(cfg);
+        let mut foc = FocController::default();
+        foc.pid_d.kp = 1.0; foc.pid_d.ki = 0.1;
+        foc.pid_q.kp = 1.0; foc.pid_q.ki = 0.1;
         foc.target.iq = 1.0;
-        for _ in 0..10 { foc.update(&TRIG, 0.0001); }
-        let d = foc.output.duty;
-        assert!(d.ta != 0.5 || d.tb != 0.5 || d.tc != 0.5);
+        for _ in 0..10 { foc.update::<LibmTrig>(0.0001); }
+        assert!(foc.duty.ta != 0.5 || foc.duty.tb != 0.5 || foc.duty.tc != 0.5);
     }
 
     #[test]
     fn reset_clears_integrators() {
-        let cfg = FocConfig {
-            pid_d: AxisPidConfig { kp: 1.0, ki: 0.5, ..AxisPidConfig::default() },
-            pid_q: AxisPidConfig { kp: 1.0, ki: 0.5, ..AxisPidConfig::default() },
-            ..FocConfig::default()
-        };
-        let mut foc = FocController::new(cfg);
+        let mut foc = FocController::default();
+        foc.pid_d.kp = 1.0; foc.pid_d.ki = 0.5;
+        foc.pid_q.kp = 1.0; foc.pid_q.ki = 0.5;
         foc.target.iq = 1.0;
-        for _ in 0..10 { foc.update(&TRIG, 0.0001); }
-        let before = foc.pid_q_mut().integral();
+        for _ in 0..10 { foc.update::<LibmTrig>(0.0001); }
+        let before = foc.pid_q.integral;
         foc.reset();
-        assert!(foc.pid_q_mut().integral().abs() < before.abs());
+        assert!(foc.pid_q.integral.abs() < before.abs());
     }
 
     #[test]
-    fn vdc_falls_back_to_config_default() {
-        let mut foc = FocController::new(FocConfig { vdc_default: 12.0, ..FocConfig::default() });
-        foc.meas.vdc = 0.0; // explicit "use default"
-        foc.update(&TRIG, 0.0001);
-        // Cannot observe vdc directly, but the call should not panic.
-        // Verifying via the duty that the chain ran end-to-end:
-        approx(foc.output.duty.ta, 0.5);
+    fn vdc_zero_safe_output() {
+        let mut foc = FocController::default();
+        foc.svpwm.vdc = 0.0;
+        foc.update::<LibmTrig>(0.0001);
+        approx(foc.duty.ta, 0.0);
     }
 
     fn approx(a: f32, b: f32) {
