@@ -16,12 +16,14 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(test, allow(unused_imports))]
 
+pub mod cascade;
 pub mod current_loop_controller;
 pub mod pid;
 pub mod speed_loop_controller;
 pub mod svpwm;
 pub mod transforms;
 
+pub use cascade::{CascadeMeasurements, CascadeRuntime, CascadeTarget, FocCascade};
 pub use current_loop_controller::{CurrentLoopController, Measurements, Runtime, Targets};
 pub use pid::Pid;
 pub use speed_loop_controller::{Feedforward, SpeedLoopController};
