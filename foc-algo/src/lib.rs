@@ -21,7 +21,9 @@ pub mod pid;
 pub mod svpwm;
 pub mod transforms;
 
-pub use current_loop::{FocConfig, FocController};
+pub use current_loop::{
+    AxisPidConfig, FocConfig, FocController, Measurements, Outputs, Runtime, Targets,
+};
 pub use pid::{Pid, PidConfig};
 pub use svpwm::{svpwm, SvpwmDuty};
 pub use transforms::{
