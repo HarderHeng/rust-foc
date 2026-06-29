@@ -18,6 +18,7 @@
 
 pub mod cascade;
 pub mod current_loop_controller;
+pub mod feedforward;
 pub mod pid;
 pub mod position_loop_controller;
 pub mod speed_loop_controller;
@@ -25,10 +26,11 @@ pub mod svpwm;
 pub mod transforms;
 
 pub use cascade::{FocController, Meas, Mode, Runtime, Target};
-pub use current_loop_controller::{AxisPid, CurrentLoop};
+pub use current_loop_controller::CurrentLoop;
+pub use feedforward::Feedforward;
 pub use pid::Pid;
 pub use position_loop_controller::PositionLoopController;
-pub use speed_loop_controller::{SpeedLoopController, Feedforward as SpeedFeedforward};
+pub use speed_loop_controller::SpeedLoopController;
 pub use svpwm::{Duty, Svpwm};
 pub use transforms::{
     Abc, AlphaBeta, Dq, LibmTrig, Trig,

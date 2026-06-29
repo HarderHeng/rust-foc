@@ -7,13 +7,16 @@
 //! | `Speed`    | speed → current              | `target.speed_ref`  |
 //! | `Position` | position → speed → current   | `target.position`   |
 //!
-//! ## Field layers
+//! ## Layering
 //!
-//! The controller owns ONE flat set of meas / target / runtime / duty fields.
-//! Inner loops (position, speed) are private and only expose their PID gains
-//! and feedforward through typed accessors for tuning.
+//! The controller owns ONE flat set of `Meas` / `Target` / `Runtime` / `Duty`
+//! fields — the single source of truth each cycle.  Inner loops (position,
+//! speed, current) are stateless math blocks beyond their PID integrators and
+//! SVPWM modulator.  Measurements flow **down** as function parameters; the
+//! duty flows **up** as the return value.  No field-copy wiring needed.
 
 use crate::current_loop_controller::CurrentLoop;
+use crate::feedforward::Feedforward;
 use crate::pid::Pid;
 use crate::position_loop_controller::PositionLoopController;
 use crate::speed_loop_controller::SpeedLoopController;
@@ -88,27 +91,27 @@ impl FocController {
         }
 
         let (iq_target, speed_target) = match self.mode {
-            Mode::Off => unreachable!(),  // handled above
+            Mode::Off => unreachable!(),
             Mode::Torque => (self.target.iq, 0.0),
             Mode::Speed => {
-                self.speed.meas.speed = self.meas.speed;
-                self.speed.meas.accel = self.meas.accel;
-                self.speed.target.speed_ref = self.target.speed_ref;
-                self.speed.update(dt);
-                (self.speed.iq_target, self.target.speed_ref)
+                let iq = self.speed.update(
+                    self.target.speed_ref,
+                    self.meas.speed,
+                    self.meas.accel,
+                    dt,
+                );
+                (iq, self.target.speed_ref)
             }
             Mode::Position => {
-                self.position.meas.position = self.meas.position;
-                self.position.meas.velocity = self.meas.speed;
-                self.position.meas.accel = self.meas.accel;
-                self.position.target.position_ref = self.target.position;
-                self.position.update(dt);
-                let omega_ref = self.position.omega_ref;
-                self.speed.meas.speed = self.meas.speed;
-                self.speed.meas.accel = self.meas.accel;
-                self.speed.target.speed_ref = omega_ref;
-                self.speed.update(dt);
-                (self.speed.iq_target, omega_ref)
+                let omega = self.position.update(
+                    self.target.position,
+                    self.meas.position,
+                    self.meas.speed,
+                    self.meas.accel,
+                    dt,
+                );
+                let iq = self.speed.update(omega, self.meas.speed, self.meas.accel, dt);
+                (iq, omega)
             }
         };
         self.runtime.iq_target = iq_target;
@@ -124,22 +127,22 @@ impl FocController {
     pub fn reset(&mut self) {
         self.position.reset();
         self.speed.reset();
-        self.current.d.pid.reset();
-        self.current.q.pid.reset();
+        self.current.d_pid.reset();
+        self.current.q_pid.reset();
     }
 
     // ── Tuning accessors ──
 
     pub fn position_pid(&mut self) -> &mut Pid { &mut self.position.pid }
-    pub fn position_feedforward(&mut self) -> &mut crate::position_loop_controller::Feedforward {
+    pub fn position_feedforward(&mut self) -> &mut Feedforward {
         &mut self.position.feedforward
     }
     pub fn speed_pid(&mut self) -> &mut Pid { &mut self.speed.pid }
-    pub fn speed_feedforward(&mut self) -> &mut crate::speed_loop_controller::Feedforward {
+    pub fn speed_feedforward(&mut self) -> &mut Feedforward {
         &mut self.speed.feedforward
     }
-    pub fn current_pid_d(&mut self) -> &mut Pid { &mut self.current.d.pid }
-    pub fn current_pid_q(&mut self) -> &mut Pid { &mut self.current.q.pid }
+    pub fn current_pid_d(&mut self) -> &mut Pid { &mut self.current.d_pid }
+    pub fn current_pid_q(&mut self) -> &mut Pid { &mut self.current.q_pid }
     pub fn current_vdc(&mut self) -> &mut f32 { &mut self.current.svpwm.vdc }
 }
 
