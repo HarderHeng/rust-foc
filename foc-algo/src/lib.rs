@@ -22,6 +22,8 @@ pub mod cascade;
 pub mod current_loop_controller;
 pub mod feedforward;
 pub mod filter;
+pub mod motor;
+#[cfg(feature = "libm-trig")]
 pub mod observer;
 pub mod pid;
 pub mod position_loop_controller;
@@ -35,12 +37,16 @@ pub use cascade::{FocController, Meas, Mode, Runtime, Target};
 pub use current_loop_controller::{CurrentLoop, Runtime as CurrentLoopRuntime};
 pub use feedforward::inertia_viscous;
 pub use filter::LowPassFilter;
+pub use motor::{MotorParams, ic_from_iab};
+#[cfg(feature = "libm-trig")]
 pub use observer::{SmoConfig, SmoObserver, SmoRuntime};
 pub use pid::Pid;
 pub use position_loop_controller::{PositionFfFn, PositionLoopController};
 pub use ramp::Ramp;
 pub use speed_loop_controller::{SpeedFfFn, SpeedLoopController};
-pub use startup::{field_weakening, mtpa, I2tLimiter};
+pub use startup::{field_weakening, I2tLimiter};
+#[cfg(feature = "libm-trig")]
+pub use startup::mtpa;
 pub use svpwm::{Duty, Svpwm};
 pub use transforms::{
     Abc, AlphaBeta, Dq, Trig,

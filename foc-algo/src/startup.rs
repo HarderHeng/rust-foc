@@ -173,6 +173,7 @@ pub fn field_weakening(vdc: f32, omega_e: f32, flux_linkage: f32, ld: f32) -> f3
 /// # Panics
 /// Panics in debug if `lq ≤ ld` (requires interior PMSM for non-trivial result).
 #[must_use]
+#[cfg(feature = "libm-trig")]
 pub fn mtpa(flux_linkage: f32, lq: f32, ld: f32, iq: f32) -> f32 {
     debug_assert!(lq > ld, "MTPA requires interior PMSM (Lq > Ld)");
     debug_assert!(lq > 0.0 && ld > 0.0, "Inductances must be positive");
@@ -334,6 +335,7 @@ mod tests {
     // ── MTPA ──
 
     #[test]
+    #[cfg(feature = "libm-trig")]
     fn mtpa_spm_returns_zero() {
         // For near-surface-mount PMSM (Lq-Ld = 10µH), MTPA offset is tiny but non-zero.
         let id = mtpa(0.01, 0.00101, 0.001, 10.0);
@@ -341,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "libm-trig")]
     fn mtpa_zero_iq_returns_zero() {
         // Zero torque command → zero MTPA offset.
         let id = mtpa(0.01, 0.002, 0.001, 0.0);
@@ -348,6 +351,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "libm-trig")]
     fn mtpa_negative_at_rated_iq() {
         let id = mtpa(0.01, 0.002, 0.001, 5.0);
         assert!(id < 0.0);
