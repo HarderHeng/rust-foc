@@ -7,9 +7,11 @@
 //!                                          ──[inv Park]──→ αβ ──[inv Clarke]──→ ABC
 //! ```
 
+#[cfg(feature = "libm-trig")]
 use libm::{cosf, sinf};
 
-const SQRT_3: f32 = 1.732_050_8;
+/// `√3/2` — precomputed half-sqrt3 for Clarke transforms and SVPWM.
+pub(crate) const HALF_SQRT3: f32 = 0.866_025_4;
 const INV_SQRT_3: f32 = 0.577_350_27;
 const TWO_THIRDS: f32 = 2.0 / 3.0;
 
@@ -23,7 +25,13 @@ pub trait Trig {
 }
 
 /// Default `Trig` backed by `libm::sinf` / `libm::cosf`.
+///
+/// Only available when the `libm-trig` feature is enabled (on by default).
+/// Disable default features and implement [`Trig`] to use hardware CORDIC or
+/// a lookup table instead.
+#[cfg(feature = "libm-trig")]
 pub struct LibmTrig;
+#[cfg(feature = "libm-trig")]
 impl Trig for LibmTrig {
     #[inline] fn sin(theta: f32) -> f32 { sinf(theta) }
     #[inline] fn cos(theta: f32) -> f32 { cosf(theta) }
@@ -51,7 +59,7 @@ pub struct Dq {
     pub q: f32,
 }
 
-// ── Clarke (ABC → αβ) ──────────────────────────────────────────────────
+// ── Clarke (ABC → αβ) ──
 
 /// Full Clarke transform (amplitude-invariant).
 ///
@@ -61,10 +69,11 @@ pub struct Dq {
 ///
 /// The zero-sequence component is discarded (assumed balanced).
 #[inline]
+#[must_use]
 pub fn clark(abc: Abc) -> AlphaBeta {
     AlphaBeta {
         alpha: TWO_THIRDS * (abc.a - 0.5 * abc.b - 0.5 * abc.c),
-        beta:  TWO_THIRDS * (SQRT_3 * 0.5 * abc.b - SQRT_3 * 0.5 * abc.c),
+        beta:  TWO_THIRDS * (HALF_SQRT3 * abc.b - HALF_SQRT3 * abc.c),
     }
 }
 
@@ -72,24 +81,27 @@ pub fn clark(abc: Abc) -> AlphaBeta {
 ///
 /// Only two phases are needed: α = ia, β = (ia + 2·ib) / √3.
 #[inline]
+#[must_use]
 pub fn clark_balanced(ia: f32, ib: f32) -> AlphaBeta {
     AlphaBeta { alpha: ia, beta: INV_SQRT_3 * (ia + 2.0 * ib) }
 }
 
 /// Inverse Clarke (αβ → ABC).
 #[inline]
+#[must_use]
 pub fn inv_clark(ab: AlphaBeta) -> Abc {
     Abc {
         a: ab.alpha,
-        b: -0.5 * ab.alpha + SQRT_3 * 0.5 * ab.beta,
-        c: -0.5 * ab.alpha - SQRT_3 * 0.5 * ab.beta,
+        b: -0.5 * ab.alpha + HALF_SQRT3 * ab.beta,
+        c: -0.5 * ab.alpha - HALF_SQRT3 * ab.beta,
     }
 }
 
-// ── Park (αβ → dq) ─────────────────────────────────────────────────────
+// ── Park (αβ → dq) ──
 
 /// Park transform (αβ → dq).  `theta` = rotor electrical angle (radians).
 #[inline]
+#[must_use]
 pub fn park<T: Trig>(ab: AlphaBeta, theta: f32) -> Dq {
     let s = T::sin(theta);
     let c = T::cos(theta);
@@ -98,15 +110,12 @@ pub fn park<T: Trig>(ab: AlphaBeta, theta: f32) -> Dq {
 
 /// Inverse Park (dq → αβ).
 #[inline]
+#[must_use]
 pub fn inv_park<T: Trig>(dq: Dq, theta: f32) -> AlphaBeta {
     let s = T::sin(theta);
     let c = T::cos(theta);
     AlphaBeta { alpha: c * dq.d - s * dq.q, beta: s * dq.d + c * dq.q }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -137,6 +146,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "libm-trig")]
     fn park_theta_zero() {
         let dq = park::<LibmTrig>(AlphaBeta { alpha: 1.0, beta: 0.5 }, 0.0);
         approx(dq.d, 1.0);
@@ -144,6 +154,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "libm-trig")]
     fn park_theta_pi_over_2() {
         let dq = park::<LibmTrig>(AlphaBeta { alpha: 1.0, beta: 0.0 }, core::f32::consts::FRAC_PI_2);
         approx(dq.d, 0.0);
@@ -151,6 +162,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "libm-trig")]
     fn inv_park_round_trip() {
         let dq = Dq { d: 0.8, q: 0.3 };
         let theta = 1.23;

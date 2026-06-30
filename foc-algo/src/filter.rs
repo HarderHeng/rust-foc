@@ -22,6 +22,7 @@ pub struct LowPassFilter {
 }
 
 impl LowPassFilter {
+    #[must_use]
     pub const fn new(cutoff_hz: f32) -> Self {
         Self { cutoff_hz, state: 0.0 }
     }
@@ -51,10 +52,6 @@ impl Default for LowPassFilter {
     fn default() -> Self { Self::new(0.0) }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,7 +72,6 @@ mod tests {
     #[test]
     fn step_response_rising() {
         let mut f = LowPassFilter::new(10.0);
-        // After one 1 ms step at 10 Hz: α ≈ 0.0628, state ≈ 0.0628
         let y = f.update(1.0, 0.001);
         assert!(y > 0.0 && y < 0.1);
     }
@@ -97,10 +93,9 @@ mod tests {
 
     #[test]
     fn alpha_clamped_at_one() {
-        // cutoff so high that α would exceed 1 — should clamp
         let mut f = LowPassFilter::new(1_000_000.0);
         let y = f.update(10.0, 0.1);
-        approx(y, 10.0); // α = 1 → instant tracking
+        approx(y, 10.0);
     }
 
     fn approx(a: f32, b: f32) {

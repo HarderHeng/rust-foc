@@ -3,9 +3,9 @@
 //! | Mode       | Chain                       | Reference field     |
 //! |------------|------------------------------|---------------------|
 //! | `Off`      | none                         | (none)              |
-//! | `Torque`   | iq_ramp → current            | `target.iq`         |
-//! | `Speed`    | speed_ramp → speed → iq_ramp → current | `target.speed_ref` |
-//! | `Position` | pos_ramp → pos → speed_ramp → speed → iq_ramp → current | `target.position` |
+//! | `Torque`   | `iq_ramp` → current            | `target.iq`         |
+//! | `Speed`    | `speed_ramp` → speed → `iq_ramp` → current | `target.speed_ref` |
+//! | `Position` | `pos_ramp` → pos → `speed_ramp` → speed → `iq_ramp` → current | `target.position` |
 //!
 //! ## Layering
 //!
@@ -21,16 +21,14 @@
 
 use crate::current_loop_controller::CurrentLoop;
 use crate::pid::Pid;
-use crate::position_loop_controller::PositionLoopController;
+use crate::position_loop_controller::{PositionFfFn, PositionLoopController};
 use crate::ramp::Ramp;
-use crate::speed_loop_controller::SpeedLoopController;
+use crate::speed_loop_controller::{SpeedFfFn, SpeedLoopController};
 use crate::svpwm::Duty;
 use crate::transforms::Trig;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Mode { Off, Torque, Speed, Position }
-
-impl Default for Mode { fn default() -> Self { Mode::Off } }
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Mode { #[default] Off, Torque, Speed, Position }
 
 #[derive(Default, Clone, Copy)]
 pub struct Target {
@@ -75,11 +73,16 @@ pub struct FocController {
     position: PositionLoopController,
     speed: SpeedLoopController,
     current: CurrentLoop,
+
+    /// Tracks the previous mode so mode-switch ramp seeding can trigger
+    /// exactly once at the transition boundary.
+    prev_mode: Mode,
 }
 
 impl Default for FocController { fn default() -> Self { Self::new(Mode::Off) } }
 
 impl FocController {
+    #[must_use]
     pub fn new(mode: Mode) -> Self {
         Self {
             mode,
@@ -93,17 +96,39 @@ impl FocController {
             position: PositionLoopController::default(),
             speed: SpeedLoopController::default(),
             current: CurrentLoop::new(),
+            prev_mode: Mode::Off,
         }
     }
 
     /// One control cycle.  Picks the chain based on `mode`, then runs the
     /// current loop to update `self.duty`.
+    ///
+    /// When `dt ≤ 0` the call is a no-op — duty and integrators are frozen.
+    /// On mode change, ramps are seeded from current measurements for
+    /// bumpless transfer.
     pub fn update<T: Trig>(&mut self, dt: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+
+        // ── Bumpless mode-switch: seed ramps from measurements ──────────
+        if self.mode != self.prev_mode {
+            match self.mode {
+                Mode::Speed => self.speed_ramp.set(self.meas.speed),
+                Mode::Position => {
+                    self.speed_ramp.set(self.meas.speed);
+                    self.pos_ramp.set(self.meas.position);
+                }
+                Mode::Torque | Mode::Off => {}
+            }
+        }
+
         if self.mode == Mode::Off {
             self.runtime.iq_target = 0.0;
             self.runtime.speed_target = 0.0;
             self.duty = Duty { ta: 0.0, tb: 0.0, tc: 0.0 };
             self.reset();
+            self.prev_mode = Mode::Off;
             return;
         }
 
@@ -134,8 +159,9 @@ impl FocController {
         };
         self.runtime.iq_target = iq_target;
         self.runtime.speed_target = speed_target;
+        self.prev_mode = self.mode;
 
-        self.current.svpwm.vdc = self.meas.vdc;
+        self.current.set_vdc(self.meas.vdc);
         self.duty = self.current.update::<T>(
             self.meas.ia, self.meas.ib, self.meas.theta,
             self.target.id_ref, iq_target,
@@ -159,10 +185,19 @@ impl FocController {
     pub fn speed_pid(&mut self) -> &mut Pid { &mut self.speed.pid }
     pub fn current_pid_d(&mut self) -> &mut Pid { &mut self.current.d_pid }
     pub fn current_pid_q(&mut self) -> &mut Pid { &mut self.current.q_pid }
-    pub fn current_vdc(&mut self) -> &mut f32 { &mut self.meas.vdc }
+
+    /// Set the speed-loop feedforward callback.  `None` disables feedforward.
+    pub fn set_speed_ff(&mut self, cb: Option<SpeedFfFn>) {
+        self.speed.ff_callback = cb;
+    }
+
+    /// Set the position-loop feedforward callback.  `None` disables feedforward.
+    pub fn set_position_ff(&mut self, cb: Option<PositionFfFn>) {
+        self.position.ff_callback = cb;
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "libm-trig"))]
 mod tests {
     use super::*;
     use crate::transforms::LibmTrig;
@@ -237,11 +272,13 @@ mod tests {
     #[test] fn vdc_wired_from_meas_to_svpwm() {
         let mut c = make(Mode::Torque);
         c.meas.vdc = 12.0;
+        c.target.iq = 0.0;
         c.update::<LibmTrig>(0.0001);
-        approx(c.current.svpwm.vdc, 12.0);
+        approx(c.duty.ta, 0.5);
+        c.meas.vdc = 0.0;
+        c.update::<LibmTrig>(0.0001);
+        approx(c.duty.ta, 0.0);
     }
-
-    // ── Ramp tests ──
 
     #[test] fn iq_ramp_limits_torque_mode() {
         let mut c = make(Mode::Torque);
@@ -280,13 +317,44 @@ mod tests {
         c.speed_ramp.rate_limit = 100.0;
         c.speed_ramp.set(50.0);
         c.reset();
-        // ramp internal state is private, but we can verify via update:
-        // after reset, ramp value is 0, so update toward target is rate-limited from 0
         c.mode = Mode::Speed;
         c.speed_pid().kp = 1.0;
         c.target.speed_ref = 0.0;
         c.update::<LibmTrig>(0.001);
-        approx(c.runtime.iq_target, 0.0); // ref=0, meas=0, no ramp effect visible
+        approx(c.runtime.iq_target, 0.0);
+    }
+
+    #[test] fn mode_switch_seeds_speed_ramp() {
+        let mut c = make(Mode::Torque);
+        c.meas.speed = 50.0;
+        c.mode = Mode::Speed;
+        c.speed_pid().kp = 1.0;
+        c.speed_ramp.rate_limit = 10.0;
+        c.target.speed_ref = 50.0;
+        c.update::<LibmTrig>(0.001);
+        assert!(c.runtime.speed_target > 49.0);
+    }
+
+    #[test] fn dt_zero_is_noop() {
+        let mut c = make(Mode::Speed);
+        c.speed_pid().kp = 1.0;
+        c.speed_pid().ki = 0.1;
+        c.target.speed_ref = 10.0;
+        c.update::<LibmTrig>(0.001);
+        let duty_before = c.duty;
+        let integral_before = c.speed.pid.integral;
+        c.update::<LibmTrig>(0.0);
+        approx(c.duty.ta, duty_before.ta);
+        approx(c.speed.pid.integral, integral_before);
+    }
+
+    #[test] fn dt_negative_is_noop() {
+        let mut c = make(Mode::Torque);
+        c.target.iq = 1.0;
+        c.update::<LibmTrig>(0.001);
+        let duty_before = c.duty;
+        c.update::<LibmTrig>(-0.001);
+        approx(c.duty.ta, duty_before.ta);
     }
 
     fn approx(a: f32, b: f32) {

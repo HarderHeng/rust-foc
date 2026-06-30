@@ -30,12 +30,28 @@ pub struct Ramp {
 
 impl Ramp {
     /// New ramp with the given rate limit.  Internal state starts at 0.
+    #[must_use]
     pub const fn new(rate_limit: f32) -> Self {
         Self { rate_limit, value: 0.0 }
     }
 
     /// Override the internal state (e.g. on initialisation or mode switch).
     pub fn set(&mut self, value: f32) {
+        self.value = value;
+    }
+
+    /// Read the current ramped value without advancing time.
+    #[must_use]
+    pub fn value(&self) -> f32 {
+        self.value
+    }
+
+    /// Reset internal state to a specific value.
+    ///
+    /// Unlike [`reset`](Self::reset) which always clears to 0, this lets you
+    /// restart the ramp from a non-zero value (e.g. after a fault recovery
+    /// where you want to resume from the current measurement).
+    pub fn reset_to(&mut self, value: f32) {
         self.value = value;
     }
 
@@ -62,10 +78,6 @@ impl Ramp {
 impl Default for Ramp {
     fn default() -> Self { Self::new(0.0) }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -122,6 +134,23 @@ mod tests {
         r.set(50.0);
         r.reset();
         approx(r.value, 0.0);
+    }
+
+    #[test]
+    fn value_reads_state() {
+        let mut r = Ramp::new(10.0);
+        r.set(42.0);
+        approx(r.value(), 42.0);
+    }
+
+    #[test]
+    fn reset_to_nonzero() {
+        let mut r = Ramp::new(10.0);
+        r.set(0.0);
+        r.reset_to(5.0);
+        approx(r.value(), 5.0);
+        let v = r.update(10.0, 0.1);
+        approx(v, 6.0);
     }
 
     fn approx(a: f32, b: f32) {

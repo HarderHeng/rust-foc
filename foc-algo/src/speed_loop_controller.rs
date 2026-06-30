@@ -27,7 +27,7 @@
 //! let iq_ref = speed.update(target_speed, measured_speed, measured_accel, dt);
 //! ```
 
-use crate::pid::Pid;
+use crate::pid::{self, Pid};
 
 /// Feedforward callback for the speed loop.
 ///
@@ -80,7 +80,7 @@ impl SpeedLoopController {
         };
         self.runtime.ff_total = ff;
 
-        (pi_out + ff).clamp(-self.pid.output_limit, self.pid.output_limit)
+        pid::combine_pi_ff(&self.pid, pi_out, ff)
     }
 
     pub fn reset(&mut self) {

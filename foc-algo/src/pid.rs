@@ -9,7 +9,6 @@
 /// PID controller state.  All fields are public — caller reads/writes directly.
 #[derive(Debug, Clone)]
 pub struct Pid {
-    // Configuration (write once at init, then read-only).
     pub kp: f32,
     pub ki: f32,
     pub kd: f32,
@@ -24,7 +23,6 @@ pub struct Pid {
     /// | 9 | 1/10        | Heavy |
     pub d_filter_cycles: u16,
 
-    // Runtime state.
     /// Integrator accumulator.  Public for monitoring; do NOT mutate.
     pub integral: f32,
     /// Previous measurement for D-term (None on first call).
@@ -37,6 +35,7 @@ pub struct Pid {
 
 impl Pid {
     /// Default: zero gains, unlimited output.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             kp: 0.0, ki: 0.0, kd: 0.0,
@@ -58,17 +57,20 @@ impl Pid {
     }
 
     /// One control step.  `dt` is the elapsed time in seconds.
+    ///
+    /// When `dt ≤ 0` (invalid or first-cycle), the integrator and derivative
+    /// are frozen — only the proportional term is applied.  This is safe
+    /// behaviour for timing glitches.
+    #[inline]
     pub fn update(&mut self, setpoint: f32, measurement: f32, dt: f32) -> f32 {
         let error = setpoint - measurement;
         let p = self.kp * error;
 
-        // D term: derivative on measurement, optional one-pole low-pass.
-        // Skipped on first call (prev_measurement is None).
         let d = match self.prev_measurement {
             Some(prev) if dt > 0.0 => {
                 let raw = (measurement - prev) / dt;
                 let alpha = if self.d_filter_cycles > 0 {
-                    1.0 / (1.0 + self.d_filter_cycles as f32)
+                    1.0 / (1.0 + f32::from(self.d_filter_cycles))
                 } else {
                     1.0
                 };
@@ -78,9 +80,9 @@ impl Pid {
             _ => 0.0,
         };
 
-        // I term with clamping anti-windup.
+        // Conditional integration: freeze when saturated or dt ≤ 0.
         let raw = p + self.integral + d;
-        if raw.abs() < self.output_limit {
+        if dt > 0.0 && raw.abs() < self.output_limit {
             self.integral += self.ki * error * dt;
         }
 
@@ -94,9 +96,14 @@ impl Default for Pid {
     fn default() -> Self { Self::new() }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+/// Combine PI output and feedforward, clamped to the PID's output limit.
+///
+/// Shared by speed and position loop controllers.
+#[inline]
+#[must_use]
+pub fn combine_pi_ff(pid: &Pid, pi_output: f32, ff_total: f32) -> f32 {
+    (pi_output + ff_total).clamp(-pid.output_limit, pid.output_limit)
+}
 
 #[cfg(test)]
 mod tests {
@@ -156,6 +163,23 @@ mod tests {
         let u = p.update(0.0, 0.0, 0.001);
         assert!(u < 10_000.0);
         assert!(u > 100.0);
+    }
+
+    #[test] fn dt_zero_freeze_integral() {
+        let mut p = pid(1.0, 10.0, 0.0, 100.0);
+        p.update(10.0, 0.0, 0.1);
+        let integral_before = p.integral;
+        let u = p.update(10.0, 0.0, 0.0);
+        approx(u, 20.0);
+        approx(p.integral, integral_before);
+    }
+
+    #[test] fn dt_negative_freeze_integral() {
+        let mut p = pid(1.0, 10.0, 0.0, 100.0);
+        p.update(10.0, 0.0, 0.1);
+        let integral_before = p.integral;
+        p.update(10.0, 0.0, -0.1);
+        approx(p.integral, integral_before);
     }
 
     fn approx(a: f32, b: f32) {

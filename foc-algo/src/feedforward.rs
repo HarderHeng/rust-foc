@@ -21,6 +21,7 @@
 ///     inertia_viscous(0.001, 0.0005, accel, speed)
 /// }
 /// ```
+#[must_use]
 pub fn inertia_viscous(inertia_gain: f32, viscous_gain: f32, accel: f32, velocity: f32) -> f32 {
     inertia_gain * accel + viscous_gain * velocity
 }

@@ -27,7 +27,7 @@
 //! let omega_ref = pos.update(target_pos, measured_pos, measured_vel, measured_accel, dt);
 //! ```
 
-use crate::pid::Pid;
+use crate::pid::{self, Pid};
 
 /// Feedforward callback for the position loop.
 ///
@@ -85,7 +85,7 @@ impl PositionLoopController {
         };
         self.runtime.ff_total = ff;
 
-        (pi_out + ff).clamp(-self.pid.output_limit, self.pid.output_limit)
+        pid::combine_pi_ff(&self.pid, pi_out, ff)
     }
 
     pub fn reset(&mut self) {
