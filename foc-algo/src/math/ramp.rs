@@ -91,9 +91,8 @@ mod tests {
 
     #[test]
     fn linear_ramp_up() {
-        let mut r = Ramp::new(10.0);   // 10 units/sec
+        let mut r = Ramp::new(10.0);
         r.set(0.0);
-        // After 0.1 s, max change = 10 × 0.1 = 1.0
         let v = r.update(5.0, 0.1);
         approx(v, 1.0);
     }
@@ -115,7 +114,7 @@ mod tests {
 
     #[test]
     fn set_bypasses_ramp() {
-        let mut r = Ramp::new(1.0);    // very slow
+        let mut r = Ramp::new(1.0);
         r.set(100.0);
         approx(r.value, 100.0);
     }
@@ -124,7 +123,7 @@ mod tests {
     fn small_step_within_limit() {
         let mut r = Ramp::new(1000.0);
         r.set(0.0);
-        let v = r.update(0.5, 0.001);  // needs 0.5, max_step = 1.0
+        let v = r.update(0.5, 0.001);
         approx(v, 0.5);
     }
 

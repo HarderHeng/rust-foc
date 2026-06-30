@@ -64,8 +64,6 @@ pub fn circle_limitation(id: f32, iq: f32, i_max: f32) -> (f32, f32) {
         return (id, iq);
     }
 
-    // Outside the circle — scale to the boundary.  `k = i_max / |v|`
-    // preserves phase.  Guard against the (theoretical) zero-magnitude input.
     let magnitude = libm::sqrtf(square);
     if magnitude <= 0.0 {
         return (0.0, 0.0);
@@ -87,7 +85,6 @@ mod tests {
     #[test]
     fn inside_circle_unchanged() {
         let (id, iq) = circle_limitation(2.0, 3.0, 10.0);
-        // √(4+9) ≈ 3.6 < 10, no change
         approx(id, 2.0);
         approx(iq, 3.0);
     }
@@ -101,7 +98,6 @@ mod tests {
 
     #[test]
     fn outside_circle_scales_to_boundary() {
-        // (3, 4) magnitude 5, i_max=2.5 → scale by 0.5
         let (id, iq) = circle_limitation(3.0, 4.0, 2.5);
         approx(id, 1.5);
         approx(iq, 2.0);
@@ -109,8 +105,6 @@ mod tests {
 
     #[test]
     fn preserves_phase_after_clamp() {
-        // Input phase: atan2(4, 3) ≈ 53.13°
-        // After clamp to 2.5: (1.5, 2.0), phase should be the same
         let (id, iq) = circle_limitation(3.0, 4.0, 2.5);
         let phase_in = (4.0_f32).atan2(3.0);
         let phase_out = iq.atan2(id);
@@ -119,7 +113,6 @@ mod tests {
 
     #[test]
     fn pure_d_axis_clamps_d() {
-        // (10, 0) with i_max=3 → (3, 0)
         let (id, iq) = circle_limitation(10.0, 0.0, 3.0);
         approx(id, 3.0);
         approx(iq, 0.0);
@@ -127,7 +120,6 @@ mod tests {
 
     #[test]
     fn pure_q_axis_clamps_q() {
-        // (0, 10) with i_max=3 → (0, 3)
         let (id, iq) = circle_limitation(0.0, 10.0, 3.0);
         approx(id, 0.0);
         approx(iq, 3.0);
@@ -135,7 +127,6 @@ mod tests {
 
     #[test]
     fn negative_d_id_kept() {
-        // (-6, 8) magnitude 10, i_max=5 → (-3, 4)
         let (id, iq) = circle_limitation(-6.0, 8.0, 5.0);
         approx(id, -3.0);
         approx(iq, 4.0);
@@ -143,7 +134,6 @@ mod tests {
 
     #[test]
     fn negative_idq_preserved() {
-        // Reverse direction: (-3, -4) magnitude 5, i_max=2 → (-1.2, -1.6)
         let (id, iq) = circle_limitation(-3.0, -4.0, 2.0);
         approx(id, -1.2);
         approx(iq, -1.6);
@@ -172,17 +162,13 @@ mod tests {
 
     #[test]
     fn iq_alone_clamped_below_max() {
-        // Rectangular-clamp would let this through (|iq|=4 ≤ 5),
-        // circle-clamp catches the vector too.
         let (id, iq) = circle_limitation(-3.0, 4.0, 5.0);
-        // Magnitude 5, exactly on circle
         let mag = (id * id + iq * iq).sqrt();
         approx(mag, 5.0);
     }
 
     #[test]
     fn output_never_exceeds_max() {
-        // Sweep over a range of inputs to verify magnitude constraint.
         for &(id, iq) in &[
             (10.0, 0.0), (-10.0, 0.0), (0.0, 10.0), (0.0, -10.0),
             (7.0, 7.0), (-7.0, -7.0), (5.0, -12.0),

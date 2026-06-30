@@ -66,6 +66,9 @@
 use crate::math::filter::LowPassFilter;
 use libm::atan2f;
 
+#[cfg(test)]
+use crate::math::LibmTrig;
+
 /// SMO configuration — set once at init.
 #[derive(Clone, Copy, Debug)]
 pub struct SmoConfig {
@@ -98,16 +101,10 @@ pub struct SmoRuntime {
 /// Sliding-mode observer + PLL for sensorless FOC.
 pub struct SmoObserver {
     cfg: SmoConfig,
-
-    // Current observer state
     i_alpha_hat: f32,
     i_beta_hat: f32,
-
-    // Back-EMF filters (LPF the switching signal)
     lpf_e_alpha: LowPassFilter,
     lpf_e_beta: LowPassFilter,
-
-    // PLL state
     theta_hat: f32,
     omega_hat: f32,
     pll_integral: f32,
@@ -166,7 +163,33 @@ impl SmoObserver {
         self.runtime = SmoRuntime::default();
     }
 
-    /// One observer step.
+    /// One observer step with dq-axis inputs.
+    ///
+    /// `v_d, v_q` are the current-loop PI outputs (voltage references in
+    /// the rotor frame).  `theta` is the *previous* estimated angle used to
+    /// transform them to αβ.  `i_d, i_q` are the measured currents in the
+    /// rotor frame — typically obtained from `CurrentLoop::runtime`.
+    ///
+    /// When `dt ≤ 0`, the call is a no-op.
+    pub fn update_dq<T: crate::math::Trig>(
+        &mut self,
+        v_d: f32, v_q: f32, theta: f32,
+        i_d: f32, i_q: f32,
+        dt: f32,
+    ) {
+        if dt <= 0.0 {
+            return;
+        }
+        let v_ab = crate::math::inv_park::<T>(
+            crate::math::Dq { d: v_d, q: v_q }, theta,
+        );
+        let i_ab = crate::math::inv_park::<T>(
+            crate::math::Dq { d: i_d, q: i_q }, theta,
+        );
+        self.update(v_ab.alpha, v_ab.beta, i_ab.alpha, i_ab.beta, dt);
+    }
+
+    /// One observer step with αβ-axis inputs.
     ///
     /// `v_alpha, v_beta` are the commanded voltages (from the current-loop PI
     /// outputs).  `i_alpha, i_beta` are the measured (Clarke-transformed)
@@ -183,55 +206,47 @@ impl SmoObserver {
             return;
         }
 
-        // ── 1. Current observer error ──
+        // Current observer error
         let err_alpha = self.i_alpha_hat - i_alpha;
         let err_beta  = self.i_beta_hat  - i_beta;
-
-        // Switching function: sign(error) — extracts the back-EMF.
         let z_alpha = self.cfg.k_slide * sign(err_alpha);
         let z_beta  = self.cfg.k_slide * sign(err_beta);
 
-        // ── 2. Current observer dynamics (Euler integration) ──
-        let inv_ls = 1.0 / self.cfg.ls;
+        // Current observer dynamics (Euler integration):
         // dî/dt = (v − Rs·î + z) / Ls
+        let inv_ls = 1.0 / self.cfg.ls;
         self.i_alpha_hat += (v_alpha - self.cfg.rs * self.i_alpha_hat + z_alpha) * inv_ls * dt;
         self.i_beta_hat  += (v_beta  - self.cfg.rs * self.i_beta_hat  + z_beta)  * inv_ls * dt;
-
         self.runtime.i_alpha_hat = self.i_alpha_hat;
         self.runtime.i_beta_hat  = self.i_beta_hat;
 
-        // ── 3. Back-EMF extraction (low-pass filter the switching signal) ──
+        // Back-EMF: low-pass the switching signal.
         let e_alpha = self.lpf_e_alpha.update(z_alpha, dt);
         let e_beta  = self.lpf_e_beta.update(z_beta, dt);
-
         self.runtime.e_alpha = e_alpha;
         self.runtime.e_beta  = e_beta;
 
-        // ── 4. Raw angle from back-EMF ──
-        // For PMSM: e_α = −ω·λ_pm·sin(θ), e_β = ω·λ_pm·cos(θ)
-        // Angle: θ = atan2(−e_α, e_β)
-        let theta_raw = atan2f(-e_alpha, e_beta);
-        // Normalise to [0, 2π)
-        let theta_raw = if theta_raw < 0.0 { theta_raw + core::f32::consts::TAU } else { theta_raw };
-
+        // Raw angle: θ = atan2(−e_α, e_β).  Normalise to [0, 2π).
+        let mut theta_raw = atan2f(-e_alpha, e_beta);
+        if theta_raw < 0.0 {
+            theta_raw += core::f32::consts::TAU;
+        }
         self.runtime.theta_raw = theta_raw;
 
-        // ── 5. PLL — tracks the raw angle smoothly ──
+        // PLL — wrap error to [−π, π], then integrate.
         let mut pll_error = theta_raw - self.theta_hat;
-        // Angle wrap to [−π, π]
         if pll_error > core::f32::consts::PI {
             pll_error -= core::f32::consts::TAU;
         } else if pll_error < -core::f32::consts::PI {
             pll_error += core::f32::consts::TAU;
         }
-
         self.runtime.pll_error = pll_error;
 
         self.pll_integral += self.cfg.pll_ki * pll_error * dt;
         self.omega_hat = self.cfg.pll_kp * pll_error + self.pll_integral;
         self.theta_hat += self.omega_hat * dt;
 
-        // Normalise θ̂ to [0, 2π)
+        // Normalise θ̂ to [0, 2π).
         if self.theta_hat >= core::f32::consts::TAU {
             self.theta_hat -= core::f32::consts::TAU;
         } else if self.theta_hat < 0.0 {
@@ -342,6 +357,44 @@ mod tests {
         assert!((sign(5.0) - 1.0).abs() < 1e-5);
         assert!((sign(-3.0) + 1.0).abs() < 1e-5);
         assert!((sign(0.0) - 0.0).abs() < 1e-5);
+    }
+
+    // ── update_dq ──
+
+    #[test]
+    fn update_dq_routes_to_alpha_beta() {
+        // Same dq inputs transformed by inv_park should match update()'s
+        // αβ path.  Both should produce the same observer state.
+        let cfg = default_cfg();
+
+        // Pick a non-zero theta so the inv_park transform is non-trivial.
+        let theta = 1.7_f32;
+        let v_d = 0.0; let v_q = 5.0;
+        let i_d = 0.0; let i_q = 0.5;
+
+        // Path 1: compute αβ externally, call update()
+        let v_ab = crate::math::inv_park::<LibmTrig>(crate::math::Dq { d: v_d, q: v_q }, theta);
+        let i_ab = crate::math::inv_park::<LibmTrig>(crate::math::Dq { d: i_d, q: i_q }, theta);
+
+        let mut smo_a = SmoObserver::new(cfg);
+        let mut smo_b = SmoObserver::new(cfg);
+        for _ in 0..50 {
+            smo_a.update(v_ab.alpha, v_ab.beta, i_ab.alpha, i_ab.beta, 0.0001);
+            smo_b.update_dq::<LibmTrig>(v_d, v_q, theta, i_d, i_q, 0.0001);
+        }
+
+        // State should be identical within float rounding.
+        let eps = 1e-4;
+        assert!((smo_a.theta_hat() - smo_b.theta_hat()).abs() < eps);
+        assert!((smo_a.omega_hat() - smo_b.omega_hat()).abs() < eps);
+    }
+
+    #[test]
+    fn update_dq_dt_zero_noop() {
+        let mut smo = SmoObserver::new(default_cfg());
+        smo.set_angle(1.0);
+        smo.update_dq::<LibmTrig>(1.0, 2.0, 0.5, 0.1, 0.2, 0.0);
+        assert!((smo.theta_hat() - 1.0).abs() < 1e-5);
     }
 
     // ── PLL tuning ──

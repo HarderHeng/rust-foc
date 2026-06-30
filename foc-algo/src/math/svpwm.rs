@@ -29,7 +29,6 @@ impl Duty {
     #[must_use]
     pub fn to_timer_counts(self, period: u16) -> (u16, u16, u16) {
         let p = f32::from(period);
-        // Clamp duty to [0, 1], scale, then round to nearest integer.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let scale = |d: f32| -> u16 { (d.clamp(0.0, 1.0) * p + 0.5) as u16 };
         (scale(self.ta), scale(self.tb), scale(self.tc))
@@ -66,14 +65,13 @@ impl Duty {
         }
         #[allow(clippy::cast_precision_loss)]
         let offset = dead_time_ns as f32 / pwm_period_ns as f32;
-        // Positive current → subtract duty (current flows out through high-side
-        // switch, dead-time creates a negative voltage error).
-        // Negative current → add duty (current commutates to low-side diode).
+        // Positive current subtracts duty (current flows out through the
+        // high-side switch; dead-time creates a negative voltage error).
+        // Negative current adds duty (commutates to the low-side diode).
         // Zero/near-zero current → no compensation.
         if ia > 0.0 { self.ta -= offset; } else if ia < 0.0 { self.ta += offset; }
         if ib > 0.0 { self.tb -= offset; } else if ib < 0.0 { self.tb += offset; }
         if ic > 0.0 { self.tc -= offset; } else if ic < 0.0 { self.tc += offset; }
-        // Re-clamp to [0, 1] for safety.
         self.ta = self.ta.clamp(0.0, 1.0);
         self.tb = self.tb.clamp(0.0, 1.0);
         self.tc = self.tc.clamp(0.0, 1.0);
@@ -115,12 +113,12 @@ impl Svpwm {
             return;
         }
 
-        // Inverse Clarke inlined: va=α, vb=-½α+½√3·β, vc=-½α-½√3·β
+        // Inverse Clarke inlined: va=α, vb=-½α+½√3·β, vc=-½α-½√3·β.
         let va = v_alpha;
         let vb = -0.5 * v_alpha + HALF_SQRT3 * v_beta;
         let vc = -0.5 * v_alpha - HALF_SQRT3 * v_beta;
 
-        // Zero-sequence injection (centred SVM).
+        // Centred SVM: subtract mean of max/min phase for zero-sequence.
         let vmax = va.max(vb).max(vc);
         let vmin = va.min(vb).min(vc);
         let voffset = -0.5 * (vmax + vmin);

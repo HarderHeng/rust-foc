@@ -170,30 +170,30 @@ impl FocController {
             return;
         }
 
-        // ── 1. Bumpless mode-switch: seed ramps from measurements ──────
+        // 1. Bumpless mode-switch
         if self.mode != self.prev_mode {
             self.seed_ramps_on_mode_change();
         }
 
-        // ── 2. Off branch ────────────────────────────────────────────────
+        // 2. Off branch
         if self.mode == Mode::Off {
             self.apply_off_state();
             return;
         }
 
-        // ── 3. Run mode-specific loop chain ─────────────────────────────
+        // 3. Mode-specific loop chain
         let (iq_target, speed_target) = self.compute_loop_output(dt);
         self.runtime.iq_target = iq_target;
         self.runtime.speed_target = speed_target;
         self.prev_mode = self.mode;
 
-        // ── 4. Circle limitation ────────────────────────────────────────
+        // 4. Circle limitation
         let (id_cmd, iq_cmd, limited) = self.apply_circle_limit(iq_target);
         self.runtime.id_command = id_cmd;
         self.runtime.iq_command = iq_cmd;
         self.runtime.current_limited = limited;
 
-        // ── 5. Current loop → PWM duty ──────────────────────────────────
+        // 5. Current loop → PWM duty
         self.current.set_vdc(self.meas.vdc);
         self.duty = self.current.update::<T>(
             self.meas.ia, self.meas.ib, self.meas.theta,
@@ -407,7 +407,6 @@ mod tests {
     }
 
     #[test] fn off_mode_preserves_integrators_by_default() {
-        // Soft off: PI state survives a transient Off → non-Off cycle.
         let mut c = make(Mode::Speed);
         c.speed_pid().ki = 1.0;
         c.target.speed_ref = 1.0;
@@ -416,9 +415,7 @@ mod tests {
         assert!(integral_before != 0.0);
         c.mode = Mode::Off;
         c.update::<LibmTrig>(0.0001);
-        // Duty zeroed
         approx(c.duty.ta, 0.0);
-        // Integrator preserved
         approx(c.speed.pid.integral, integral_before);
     }
 
@@ -435,20 +432,20 @@ mod tests {
 
     #[test] fn iq_ramp_limits_torque_mode() {
         let mut c = make(Mode::Torque);
-        c.iq_ramp.rate_limit = 10.0; // 10 A/s
+        c.iq_ramp.rate_limit = 10.0;
         c.iq_ramp.set(0.0);
         c.target.iq = 100.0;
-        c.update::<LibmTrig>(0.001);  // max step = 0.01 A
+        c.update::<LibmTrig>(0.001);
         assert!(c.runtime.iq_target < 0.02);
     }
 
     #[test] fn speed_ramp_softens_step() {
         let mut c = make(Mode::Speed);
         c.speed_pid().kp = 1.0;
-        c.speed_ramp.rate_limit = 20.0;  // 20 rad/s²
+        c.speed_ramp.rate_limit = 20.0;
         c.speed_ramp.set(0.0);
         c.target.speed_ref = 100.0;
-        c.update::<LibmTrig>(0.001);  // max step = 0.02 rad/s
+        c.update::<LibmTrig>(0.001);
         assert!(c.runtime.speed_target < 0.03);
     }
 
@@ -456,12 +453,10 @@ mod tests {
         let mut c = make(Mode::Position);
         c.position_pid().kp = 1.0;
         c.speed_pid().kp = 1.0;
-        c.pos_ramp.rate_limit = 5.0;   // 5 rad/s
+        c.pos_ramp.rate_limit = 5.0;
         c.pos_ramp.set(0.0);
         c.target.position = 10.0;
-        c.update::<LibmTrig>(0.001);   // max step = 0.005 rad
-        // omega_ref comes from position loop which sees ramped pos_ref
-        // speed_target is omega_ref → speed_ramp → ramped
+        c.update::<LibmTrig>(0.001);
         assert!(c.runtime.speed_target < 0.006);
     }
 
@@ -581,6 +576,92 @@ mod tests {
         let _: f32 = rt.id;
         let _: f32 = rt.iq;
         let _: crate::math::svpwm::Duty = rt.duty;
+    }
+
+    // ── End-to-end smoke test ─────────────────────────────────────────
+    //
+    // Exercises every public API in one chain to catch import-path and
+    // API-consistency issues that unit tests miss.
+
+    #[test]
+    #[cfg(feature = "libm-trig")]
+    fn full_chain_smoke() {
+        use crate::motor::MotorParams;
+        use crate::observer::{SmoConfig, SmoObserver};
+        use crate::math::circle_limitation;
+        use crate::{field_weakening, pll_pi_gains};
+
+        let motor = MotorParams {
+            r: 0.3, ld: 0.0005, lq: 0.0005,
+            flux_linkage: 0.01, pole_pairs: 7,
+            rated_current: 5.0, inertia: 1e-5,
+        };
+
+        let (kp_i, ki_i) = motor.current_pi_gains(1000.0);
+        let (kp_s, ki_s) = motor.speed_pi_gains(50.0, 1000.0);
+        let k_slide = motor.smo_slide_gain(1500.0, 1.5);
+        let (kp_pll, ki_pll) = pll_pi_gains(20.0);
+
+        let mut ctrl = FocController::new(Mode::Speed);
+        ctrl.set_current_limit(motor.rated_current);
+        ctrl.speed_pid().kp = kp_s;
+        ctrl.speed_pid().ki = ki_s;
+        ctrl.current_pid_d().kp = kp_i;
+        ctrl.current_pid_d().ki = ki_i;
+        ctrl.current_pid_q().kp = kp_i;
+        ctrl.current_pid_q().ki = ki_i;
+
+        let mut smo = SmoObserver::new(SmoConfig {
+            rs: motor.r, ls: motor.ld,
+            k_slide, emf_cutoff: 200.0,
+            pll_kp: kp_pll, pll_ki: ki_pll,
+        });
+        smo.set_angle(0.0);
+
+        let mut angle_seed: f32 = 0.0;
+        let dt: f32 = 1.0 / 20_000.0;
+
+        for _ in 0..50 {
+            ctrl.meas.ia = 0.1;
+            ctrl.meas.ib = -0.05;
+            ctrl.meas.theta = smo.theta_hat();
+            ctrl.meas.speed = smo.omega_hat();
+            ctrl.meas.accel = 0.0;
+            ctrl.meas.vdc = 24.0;
+
+            ctrl.target.speed_ref = 100.0;
+            ctrl.target.id_ref = field_weakening(
+                ctrl.meas.vdc, smo.omega_hat(),
+                motor.flux_linkage, motor.ld,
+            );
+
+            let (id_c, iq_c) = circle_limitation(
+                ctrl.target.id_ref, ctrl.target.iq,
+                motor.rated_current,
+            );
+            ctrl.target.id_ref = id_c;
+            ctrl.target.iq = iq_c;
+
+            ctrl.update::<LibmTrig>(dt);
+
+            let vdq = ctrl.current_runtime();
+            smo.update_dq::<LibmTrig>(
+                vdq.vd, vdq.vq, angle_seed,
+                vdq.id, vdq.iq, dt,
+            );
+            angle_seed = smo.theta_hat();
+
+            let _ = ctrl.duty
+                .apply_dead_time(200, 50_000, ctrl.meas.ia, ctrl.meas.ib,
+                                 -(ctrl.meas.ia + ctrl.meas.ib))
+                .to_timer_counts(7199);
+        }
+
+        // Sanity: duty in [0, 1].
+        let d = ctrl.duty;
+        assert!(d.ta >= 0.0 && d.ta <= 1.0);
+        assert!(d.tb >= 0.0 && d.tb <= 1.0);
+        assert!(d.tc >= 0.0 && d.tc <= 1.0);
     }
 
     fn approx(a: f32, b: f32) {

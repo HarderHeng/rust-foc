@@ -115,7 +115,7 @@ mod tests {
         let mut s = with_pid(1.0, 0.0, 0.0, 10.0);
         s.ff_callback = None;
         let out = s.update(2.0, 0.0, 0.0, 0.001);
-        approx(out, 2.0); // pure P: kp × error = 1 × 2
+        approx(out, 2.0);
     }
 
     #[test]
@@ -146,7 +146,6 @@ mod tests {
 
         let mut s = with_pid(1.0, 0.0, 0.0, 10.0);
         s.ff_callback = Some(inertia_ff);
-        // P = 1 × (2 − 0) = 2, FF = 0.5 × 4 = 2, total = 4
         let out = s.update(2.0, 0.0, 4.0, 0.001);
         approx(out, 4.0);
         approx(s.runtime.ff_total, 2.0);
@@ -165,14 +164,12 @@ mod tests {
 
         let mut s = with_pid(1.0, 0.0, 0.0, 10.0);
         s.ff_callback = Some(huge_ff);
-        // P = 2, FF = 400, unclamped = 402
         let out = s.update(2.0, 0.0, 4.0, 0.001);
-        approx(out, 10.0);  // clamped
+        approx(out, 10.0);
     }
 
     #[test]
     fn callback_can_use_ref() {
-        // A feedforward that depends on the speed reference, not the measurement
         fn ref_based_ff(speed_ref: f32, _speed: f32, _accel: f32) -> f32 { 0.1 * speed_ref }
 
         let mut s = with_pid(0.0, 0.0, 0.0, 10.0);

@@ -149,7 +149,6 @@ mod tests {
 
         let mut p = with_pid(1.0, 0.0, 10.0);
         p.ff_callback = Some(inertia_ff);
-        // P = 1 × 2 = 2, FF = 0.5 × 4 = 2, total = 4
         let out = p.update(2.0, 0.0, 0.0, 4.0, 0.001);
         approx(out, 4.0);
     }
@@ -168,7 +167,7 @@ mod tests {
         let mut p = with_pid(1.0, 0.0, 10.0);
         p.ff_callback = Some(huge_ff);
         let out = p.update(2.0, 0.0, 0.0, 4.0, 0.001);
-        approx(out, 10.0);  // clamped, not 402
+        approx(out, 10.0);
     }
 
     #[test]

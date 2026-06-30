@@ -12,4 +12,3 @@ libm = { version = "0.2", default-features = false }
 [features]
 default = ["libm-trig"]
 libm-trig = []
-std = []
