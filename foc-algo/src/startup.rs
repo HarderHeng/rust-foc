@@ -142,9 +142,150 @@ pub fn field_weakening(vdc: f32, omega_e: f32, flux_linkage: f32, ld: f32) -> f3
     (flux_linkage / ld) * ratio
 }
 
+// ---------------------------------------------------------------------------
+// MTPA — Maximum Torque Per Ampere
+// ---------------------------------------------------------------------------
+
+/// Compute the optimal d-axis current for maximum torque per ampere.
+///
+/// For interior PMSMs where `Lq > Ld`, injecting negative `id` produces
+/// reluctance torque that *adds* to the PM torque.  The MTPA curve finds
+/// the `(id, iq)` pair that maximises torque for a given current magnitude.
+///
+/// For surface-mount PMSMs (`Lq ≈ Ld`): this returns 0 — no benefit.
+///
+/// # Formula
+///
+/// ```text
+/// id = (λ_pm / (2·(Lq−Ld))) − √( (λ_pm/(2·(Lq−Ld)))² + iq² )
+/// ```
+///
+/// # Arguments
+/// * `flux_linkage` — PM flux linkage `λ_pm` (Wb).
+/// * `lq` — q-axis inductance (H).  Must be > `ld`.
+/// * `ld` — d-axis inductance (H).
+/// * `iq` — q-axis current reference (A).  Use the absolute value; the sign
+///   of the returned `id` is always negative (or zero for SPM).
+///
+/// # Returns
+/// `id_mtpa ≤ 0` (A).  Negative — creates positive reluctance torque.
+///
+/// # Panics
+/// Panics in debug if `lq ≤ ld` (requires interior PMSM for non-trivial result).
+#[must_use]
+pub fn mtpa(flux_linkage: f32, lq: f32, ld: f32, iq: f32) -> f32 {
+    debug_assert!(lq > ld, "MTPA requires interior PMSM (Lq > Ld)");
+    debug_assert!(lq > 0.0 && ld > 0.0, "Inductances must be positive");
+
+    let delta_l = lq - ld;
+    if delta_l <= 0.0 {
+        return 0.0;
+    }
+    let iq_abs = iq.abs();
+    let term = flux_linkage / (2.0 * delta_l);
+    let id_mtpa = term - libm::sqrtf(term * term + iq_abs * iq_abs);
+    // id_mtpa is always ≤ 0 for interior PMSM — subtracts from PM flux.
+    id_mtpa
+}
+
+// ---------------------------------------------------------------------------
+// I²t thermal overload protection
+// ---------------------------------------------------------------------------
+
+/// I²t thermal overload limiter.
+///
+/// Tracks the accumulated squared-current error over time.  When the RMS
+/// current exceeds the rated value for long enough, the limiter triggers
+/// and scales down the maximum allowed current.
+///
+/// # Thermal model
+///
+/// ```text
+/// heating   = (i² − i_rated²) · dt        [A²·s]
+/// cooling   = −cooling_rate · accumulator · dt   [A²·s]
+/// foldback  = max(0, 1 − accumulator / limit)
+/// ```
+///
+/// When `accumulator ≥ limit`, `foldback()` returns 0 (hard cut).  When the
+/// current drops below rated, the accumulator cools down and foldback
+/// recovers.
+///
+/// # Usage
+///
+/// ```ignore
+/// let mut i2t = I2tLimiter::new(10.0, 50.0, 0.5);  // 10 A rated, 50 A²·s limit
+/// // Each cycle:
+/// let iq_max = i2t.foldback(i_actual, dt);
+/// // Use iq_max as the upper bound on the speed-loop output.
+/// ```
+#[derive(Clone, Copy)]
+pub struct I2tLimiter {
+    /// Rated continuous current (A RMS).
+    pub i_rated: f32,
+    /// Thermal capacity — maximum accumulated I²·t before hard cut (A²·s).
+    pub limit: f32,
+    /// Cooling rate (fraction of accumulator decayed per second).  1.0 = full
+    /// cooldown in ~1 s.  0.01 = slow cooldown (minutes).  Typical: 0.1–0.5.
+    pub cooling_rate: f32,
+    accumulator: f32,
+}
+
+impl I2tLimiter {
+    #[must_use]
+    pub fn new(i_rated: f32, limit: f32, cooling_rate: f32) -> Self {
+        Self { i_rated, limit, cooling_rate, accumulator: 0.0 }
+    }
+
+    /// Current foldback factor.  Call each control cycle with the actual
+    /// current magnitude `|i|` (A) and `dt` (seconds).
+    ///
+    /// Returns a factor in [0, 1] — multiply this by the nominal current
+    /// limit to get the thermally-limited maximum.
+    #[must_use]
+    pub fn foldback(&mut self, i_actual: f32, dt: f32) -> f32 {
+        if dt <= 0.0 {
+            return self.factor();
+        }
+        let i2 = i_actual * i_actual;
+        let i2_rated = self.i_rated * self.i_rated;
+        // Heating: I² − I_rated²
+        self.accumulator += (i2 - i2_rated) * dt;
+        // Cooling: proportional decay
+        self.accumulator -= self.cooling_rate * self.accumulator * dt;
+        // Clamp to [0, limit] — can't go negative, won't exceed limit (saturated)
+        self.accumulator = self.accumulator.clamp(0.0, self.limit);
+        self.factor()
+    }
+
+    /// Current foldback factor without advancing time.
+    #[must_use]
+    pub fn factor(&self) -> f32 {
+        if self.limit <= 0.0 {
+            return 1.0;
+        }
+        (1.0 - self.accumulator / self.limit).max(0.0)
+    }
+
+    /// Accumulated I²·t value (A²·s).  0 = cold, at limit = hard cut.
+    #[must_use]
+    pub fn accumulator(&self) -> f32 {
+        self.accumulator
+    }
+
+    pub fn reset(&mut self) {
+        self.accumulator = 0.0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── field_weakening ──
 
     #[test]
     fn below_base_speed_returns_zero() {
@@ -188,6 +329,78 @@ mod tests {
         let id = field_weakening(24.0, 1_000_000.0, 0.01, 0.001);
         assert!(id < -9.9, "id={id} should approach -10 at high speed");
         assert!(id >= -10.0, "id={id} must never exceed characteristic current");
+    }
+
+    // ── MTPA ──
+
+    #[test]
+    fn mtpa_spm_returns_zero() {
+        // For near-surface-mount PMSM (Lq-Ld = 10µH), MTPA offset is tiny but non-zero.
+        let id = mtpa(0.01, 0.00101, 0.001, 10.0);
+        assert!(id <= 0.0);
+    }
+
+    #[test]
+    fn mtpa_zero_iq_returns_zero() {
+        // Zero torque command → zero MTPA offset.
+        let id = mtpa(0.01, 0.002, 0.001, 0.0);
+        approx(id, 0.0);
+    }
+
+    #[test]
+    fn mtpa_negative_at_rated_iq() {
+        let id = mtpa(0.01, 0.002, 0.001, 5.0);
+        assert!(id < 0.0);
+        assert!(id > -10.0);
+    }
+
+    // ── I²t ──
+
+    #[test]
+    fn i2t_cold_is_full_current() {
+        let lim = I2tLimiter::new(10.0, 50.0, 0.5);
+        assert!((lim.factor() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn i2t_rated_current_no_heating() {
+        let mut lim = I2tLimiter::new(10.0, 50.0, 0.5);
+        for _ in 0..100 {
+            let _ = lim.foldback(10.0, 0.001);
+        }
+        assert!(lim.accumulator() < 0.01);
+    }
+
+    #[test]
+    fn i2t_overload_builds_up() {
+        let mut lim = I2tLimiter::new(10.0, 50.0, 0.5);
+        let _ = lim.foldback(20.0, 0.1);
+        assert!(lim.accumulator() > 25.0);
+    }
+
+    #[test]
+    fn i2t_overload_causes_foldback() {
+        let mut lim = I2tLimiter::new(10.0, 50.0, 0.5);
+        let _ = lim.foldback(30.0, 0.1);
+        approx(lim.factor(), 0.0);
+    }
+
+    #[test]
+    fn i2t_cools_down() {
+        let mut lim = I2tLimiter::new(10.0, 50.0, 1.0);
+        let _ = lim.foldback(30.0, 0.05);
+        let acc_before = lim.accumulator();
+        assert!(acc_before > 0.0);
+        let _ = lim.foldback(0.0, 0.1);
+        assert!(lim.accumulator() < acc_before);
+    }
+
+    #[test]
+    fn i2t_reset_clears() {
+        let mut lim = I2tLimiter::new(10.0, 50.0, 0.5);
+        let _ = lim.foldback(30.0, 0.1);
+        lim.reset();
+        assert!((lim.accumulator() - 0.0).abs() < 1e-5);
     }
 
     fn approx(a: f32, b: f32) {
