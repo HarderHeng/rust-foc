@@ -87,6 +87,7 @@ impl FocController {
             self.runtime.iq_target = 0.0;
             self.runtime.speed_target = 0.0;
             self.duty = Duty { ta: 0.0, tb: 0.0, tc: 0.0 };
+            self.reset();
             return;
         }
 
@@ -117,6 +118,7 @@ impl FocController {
         self.runtime.iq_target = iq_target;
         self.runtime.speed_target = speed_target;
 
+        self.current.svpwm.vdc = self.meas.vdc;
         self.duty = self.current.update::<T>(
             self.meas.ia, self.meas.ib, self.meas.theta,
             self.target.id_ref, iq_target,
@@ -143,7 +145,7 @@ impl FocController {
     }
     pub fn current_pid_d(&mut self) -> &mut Pid { &mut self.current.d_pid }
     pub fn current_pid_q(&mut self) -> &mut Pid { &mut self.current.q_pid }
-    pub fn current_vdc(&mut self) -> &mut f32 { &mut self.current.svpwm.vdc }
+    pub fn current_vdc(&mut self) -> &mut f32 { &mut self.meas.vdc }
 }
 
 #[cfg(test)]
@@ -202,6 +204,27 @@ mod tests {
         c.mode = Mode::Off;
         c.update::<LibmTrig>(0.0001);
         approx(c.duty.ta, 0.0);
+    }
+
+    #[test] fn off_mode_clears_integrators() {
+        let mut c = make(Mode::Speed);
+        c.speed_pid().ki = 1.0;
+        c.target.speed_ref = 1.0;
+        c.update::<LibmTrig>(0.1);                // integrator accumulates
+        assert!(c.speed.pid.integral != 0.0);
+        c.mode = Mode::Off;
+        c.update::<LibmTrig>(0.0001);             // reset fires
+        approx(c.speed.pid.integral, 0.0);
+        approx(c.current.d_pid.integral, 0.0);
+        approx(c.current.q_pid.integral, 0.0);
+        approx(c.position.pid.integral, 0.0);
+    }
+
+    #[test] fn vdc_wired_from_meas_to_svpwm() {
+        let mut c = make(Mode::Torque);
+        c.meas.vdc = 12.0;
+        c.update::<LibmTrig>(0.0001);
+        approx(c.current.svpwm.vdc, 12.0);
     }
 
     fn approx(a: f32, b: f32) {

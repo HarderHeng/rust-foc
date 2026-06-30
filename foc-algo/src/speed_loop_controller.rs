@@ -68,7 +68,7 @@ impl SpeedLoopController {
         self.runtime.ff_viscous = fv;
         self.runtime.ff_total = ft;
 
-        pi_out + ft
+        (pi_out + ft).clamp(-self.pid.output_limit, self.pid.output_limit)
     }
 
     pub fn reset(&mut self) {
@@ -142,6 +142,15 @@ mod tests {
         let mut s = with_pid(0.0, 1.0, 0.0, 10.0);
         for _ in 0..5 { s.update(1.0, 0.0, 0.0, 0.1); }
         approx(s.pid.integral, 0.5);
+    }
+
+    #[test]
+    fn feedforward_does_not_bypass_clamp() {
+        let mut s = with_pid(1.0, 0.0, 0.0, 10.0);
+        s.feedforward.inertia_gain = 100.0;  // huge FF contribution
+        // P = 1 × 2 = 2, FF = 100 × 4 = 400, unclamped = 402
+        let out = s.update(2.0, 0.0, 4.0, 0.001);
+        approx(out, 10.0);  // clamped to output_limit
     }
 
     fn approx(a: f32, b: f32) {

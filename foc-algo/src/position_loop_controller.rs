@@ -73,7 +73,7 @@ impl PositionLoopController {
         self.runtime.ff_viscous = fv;
         self.runtime.ff_total = ft;
 
-        pi_out + ft
+        (pi_out + ft).clamp(-self.pid.output_limit, self.pid.output_limit)
     }
 
     pub fn reset(&mut self) {
@@ -143,6 +143,14 @@ mod tests {
         let mut p = with_pid(0.0, 1.0, 10.0);
         for _ in 0..5 { p.update(1.0, 0.0, 0.0, 0.0, 0.1); }
         approx(p.pid.integral, 0.5);
+    }
+
+    #[test]
+    fn feedforward_does_not_bypass_clamp() {
+        let mut p = with_pid(1.0, 0.0, 10.0);
+        p.feedforward.inertia_gain = 100.0;
+        let out = p.update(2.0, 0.0, 0.0, 4.0, 0.001);
+        approx(out, 10.0);  // clamped, not 402
     }
 
     fn approx(a: f32, b: f32) {
