@@ -20,7 +20,6 @@
 //! (disabled — instant tracking).  Set a positive rate to soften step changes.
 
 use crate::current_loop_controller::CurrentLoop;
-use crate::feedforward::Feedforward;
 use crate::pid::Pid;
 use crate::position_loop_controller::PositionLoopController;
 use crate::ramp::Ramp;
@@ -157,13 +156,7 @@ impl FocController {
     // ── Tuning accessors ──
 
     pub fn position_pid(&mut self) -> &mut Pid { &mut self.position.pid }
-    pub fn position_feedforward(&mut self) -> &mut Feedforward {
-        &mut self.position.feedforward
-    }
     pub fn speed_pid(&mut self) -> &mut Pid { &mut self.speed.pid }
-    pub fn speed_feedforward(&mut self) -> &mut Feedforward {
-        &mut self.speed.feedforward
-    }
     pub fn current_pid_d(&mut self) -> &mut Pid { &mut self.current.d_pid }
     pub fn current_pid_q(&mut self) -> &mut Pid { &mut self.current.q_pid }
     pub fn current_vdc(&mut self) -> &mut f32 { &mut self.meas.vdc }

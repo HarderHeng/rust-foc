@@ -1,44 +1,26 @@
-//! Feedforward — shared inertia + viscous compensation for cascade stages.
+//! Feedforward utilities — standard compensation formulas.
 //!
-//! Both the speed loop and position loop use the same feedforward structure:
-//! an inertia term proportional to acceleration and a viscous term proportional
-//! to velocity.  This module provides the single shared definition.
+//! Each loop controller accepts an optional feedforward callback
+//! (`Option<fn(...) -> f32>`).  This module provides the common
+//! inertia + viscous friction model as a pure function that callbacks
+//! can delegate to.
 //!
-//! ```text
-//! ff = inertia_gain · accel + viscous_gain · velocity
-//! ```
-//!
-//! Set `enabled = false` to bypass all terms without touching individual gains.
+//! For a custom model, write your own function matching the callback
+//! signature — no trait or struct needed.
 
-/// Configurable feedforward gains shared by speed and position loops.
-#[derive(Clone, Copy)]
-pub struct Feedforward {
-    /// Inertia compensation gain.
-    pub inertia_gain: f32,
-    /// Viscous friction compensation gain.
-    pub viscous_gain: f32,
-    /// Master enable — when `false`, `compute()` always returns zeros.
-    pub enabled: bool,
-}
-
-impl Default for Feedforward {
-    fn default() -> Self {
-        Self { inertia_gain: 0.0, viscous_gain: 0.0, enabled: true }
-    }
-}
-
-impl Feedforward {
-    /// Evaluate the feedforward terms.
-    ///
-    /// Returns `(inertia_term, viscous_term, total)`.
-    /// All terms are zero when `enabled` is `false`.
-    pub fn compute(&self, accel: f32, velocity: f32) -> (f32, f32, f32) {
-        if self.enabled {
-            let fi = self.inertia_gain * accel;
-            let fv = self.viscous_gain * velocity;
-            (fi, fv, fi + fv)
-        } else {
-            (0.0, 0.0, 0.0)
-        }
-    }
+/// Standard inertia + viscous friction feedforward.
+///
+/// ```text
+/// ff = inertia_gain · accel + viscous_gain · velocity
+/// ```
+///
+/// Call from within a loop's feedforward callback:
+///
+/// ```ignore
+/// fn my_speed_ff(_ref: f32, speed: f32, accel: f32) -> f32 {
+///     inertia_viscous(0.001, 0.0005, accel, speed)
+/// }
+/// ```
+pub fn inertia_viscous(inertia_gain: f32, viscous_gain: f32, accel: f32, velocity: f32) -> f32 {
+    inertia_gain * accel + viscous_gain * velocity
 }
