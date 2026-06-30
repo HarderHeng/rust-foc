@@ -19,8 +19,10 @@
 pub mod cascade;
 pub mod current_loop_controller;
 pub mod feedforward;
+pub mod filter;
 pub mod pid;
 pub mod position_loop_controller;
+pub mod ramp;
 pub mod speed_loop_controller;
 pub mod svpwm;
 pub mod transforms;
@@ -28,8 +30,10 @@ pub mod transforms;
 pub use cascade::{FocController, Meas, Mode, Runtime, Target};
 pub use current_loop_controller::CurrentLoop;
 pub use feedforward::Feedforward;
+pub use filter::LowPassFilter;
 pub use pid::Pid;
 pub use position_loop_controller::PositionLoopController;
+pub use ramp::Ramp;
 pub use speed_loop_controller::SpeedLoopController;
 pub use svpwm::{Duty, Svpwm};
 pub use transforms::{

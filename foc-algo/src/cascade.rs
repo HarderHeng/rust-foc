@@ -3,9 +3,9 @@
 //! | Mode       | Chain                       | Reference field     |
 //! |------------|------------------------------|---------------------|
 //! | `Off`      | none                         | (none)              |
-//! | `Torque`   | current                      | `target.iq`         |
-//! | `Speed`    | speed → current              | `target.speed_ref`  |
-//! | `Position` | position → speed → current   | `target.position`   |
+//! | `Torque`   | iq_ramp → current            | `target.iq`         |
+//! | `Speed`    | speed_ramp → speed → iq_ramp → current | `target.speed_ref` |
+//! | `Position` | pos_ramp → pos → speed_ramp → speed → iq_ramp → current | `target.position` |
 //!
 //! ## Layering
 //!
@@ -13,12 +13,17 @@
 //! fields — the single source of truth each cycle.  Inner loops (position,
 //! speed, current) are stateless math blocks beyond their PID integrators and
 //! SVPWM modulator.  Measurements flow **down** as function parameters; the
-//! duty flows **up** as the return value.  No field-copy wiring needed.
+//! duty flows **up** as the return value.
+//!
+//! Three optional [`Ramp`](crate::ramp::Ramp) rate limiters sit between
+//! reference sources and their loops.  Each defaults to `rate_limit = 0`
+//! (disabled — instant tracking).  Set a positive rate to soften step changes.
 
 use crate::current_loop_controller::CurrentLoop;
 use crate::feedforward::Feedforward;
 use crate::pid::Pid;
 use crate::position_loop_controller::PositionLoopController;
+use crate::ramp::Ramp;
 use crate::speed_loop_controller::SpeedLoopController;
 use crate::svpwm::Duty;
 use crate::transforms::Trig;
@@ -59,6 +64,15 @@ pub struct FocController {
     pub meas: Meas,
     pub runtime: Runtime,
     pub duty: Duty,
+
+    /// Rate limiter on the position reference (rad/s²).
+    pub pos_ramp: Ramp,
+    /// Rate limiter on the speed reference (rad/s²).
+    pub speed_ramp: Ramp,
+    /// Rate limiter on the Iq reference (A/s).  Applied last, before the
+    /// current loop, in every non-Off mode.
+    pub iq_ramp: Ramp,
+
     position: PositionLoopController,
     speed: SpeedLoopController,
     current: CurrentLoop,
@@ -74,6 +88,9 @@ impl FocController {
             meas: Meas::default(),
             runtime: Runtime::default(),
             duty: Duty::default(),
+            pos_ramp: Ramp::default(),
+            speed_ramp: Ramp::default(),
+            iq_ramp: Ramp::default(),
             position: PositionLoopController::default(),
             speed: SpeedLoopController::default(),
             current: CurrentLoop::new(),
@@ -93,26 +110,27 @@ impl FocController {
 
         let (iq_target, speed_target) = match self.mode {
             Mode::Off => unreachable!(),
-            Mode::Torque => (self.target.iq, 0.0),
+            Mode::Torque => {
+                let iq = self.iq_ramp.update(self.target.iq, dt);
+                (iq, 0.0)
+            }
             Mode::Speed => {
-                let iq = self.speed.update(
-                    self.target.speed_ref,
-                    self.meas.speed,
-                    self.meas.accel,
-                    dt,
-                );
-                (iq, self.target.speed_ref)
+                let speed_ref = self.speed_ramp.update(self.target.speed_ref, dt);
+                let iq = self.speed.update(speed_ref, self.meas.speed, self.meas.accel, dt);
+                let iq_final = self.iq_ramp.update(iq, dt);
+                (iq_final, speed_ref)
             }
             Mode::Position => {
+                let pos_ref = self.pos_ramp.update(self.target.position, dt);
                 let omega = self.position.update(
-                    self.target.position,
-                    self.meas.position,
-                    self.meas.speed,
-                    self.meas.accel,
+                    pos_ref, self.meas.position,
+                    self.meas.speed, self.meas.accel,
                     dt,
                 );
-                let iq = self.speed.update(omega, self.meas.speed, self.meas.accel, dt);
-                (iq, omega)
+                let speed_ref = self.speed_ramp.update(omega, dt);
+                let iq = self.speed.update(speed_ref, self.meas.speed, self.meas.accel, dt);
+                let iq_final = self.iq_ramp.update(iq, dt);
+                (iq_final, speed_ref)
             }
         };
         self.runtime.iq_target = iq_target;
@@ -131,6 +149,9 @@ impl FocController {
         self.speed.reset();
         self.current.d_pid.reset();
         self.current.q_pid.reset();
+        self.pos_ramp.reset();
+        self.speed_ramp.reset();
+        self.iq_ramp.reset();
     }
 
     // ── Tuning accessors ──
@@ -210,10 +231,10 @@ mod tests {
         let mut c = make(Mode::Speed);
         c.speed_pid().ki = 1.0;
         c.target.speed_ref = 1.0;
-        c.update::<LibmTrig>(0.1);                // integrator accumulates
+        c.update::<LibmTrig>(0.1);
         assert!(c.speed.pid.integral != 0.0);
         c.mode = Mode::Off;
-        c.update::<LibmTrig>(0.0001);             // reset fires
+        c.update::<LibmTrig>(0.0001);
         approx(c.speed.pid.integral, 0.0);
         approx(c.current.d_pid.integral, 0.0);
         approx(c.current.q_pid.integral, 0.0);
@@ -225,6 +246,54 @@ mod tests {
         c.meas.vdc = 12.0;
         c.update::<LibmTrig>(0.0001);
         approx(c.current.svpwm.vdc, 12.0);
+    }
+
+    // ── Ramp tests ──
+
+    #[test] fn iq_ramp_limits_torque_mode() {
+        let mut c = make(Mode::Torque);
+        c.iq_ramp.rate_limit = 10.0; // 10 A/s
+        c.iq_ramp.set(0.0);
+        c.target.iq = 100.0;
+        c.update::<LibmTrig>(0.001);  // max step = 0.01 A
+        assert!(c.runtime.iq_target < 0.02);
+    }
+
+    #[test] fn speed_ramp_softens_step() {
+        let mut c = make(Mode::Speed);
+        c.speed_pid().kp = 1.0;
+        c.speed_ramp.rate_limit = 20.0;  // 20 rad/s²
+        c.speed_ramp.set(0.0);
+        c.target.speed_ref = 100.0;
+        c.update::<LibmTrig>(0.001);  // max step = 0.02 rad/s
+        assert!(c.runtime.speed_target < 0.03);
+    }
+
+    #[test] fn pos_ramp_softens_position_step() {
+        let mut c = make(Mode::Position);
+        c.position_pid().kp = 1.0;
+        c.speed_pid().kp = 1.0;
+        c.pos_ramp.rate_limit = 5.0;   // 5 rad/s
+        c.pos_ramp.set(0.0);
+        c.target.position = 10.0;
+        c.update::<LibmTrig>(0.001);   // max step = 0.005 rad
+        // omega_ref comes from position loop which sees ramped pos_ref
+        // speed_target is omega_ref → speed_ramp → ramped
+        assert!(c.runtime.speed_target < 0.006);
+    }
+
+    #[test] fn ramps_reset_with_controller() {
+        let mut c = make(Mode::Speed);
+        c.speed_ramp.rate_limit = 100.0;
+        c.speed_ramp.set(50.0);
+        c.reset();
+        // ramp internal state is private, but we can verify via update:
+        // after reset, ramp value is 0, so update toward target is rate-limited from 0
+        c.mode = Mode::Speed;
+        c.speed_pid().kp = 1.0;
+        c.target.speed_ref = 0.0;
+        c.update::<LibmTrig>(0.001);
+        approx(c.runtime.iq_target, 0.0); // ref=0, meas=0, no ramp effect visible
     }
 
     fn approx(a: f32, b: f32) {
