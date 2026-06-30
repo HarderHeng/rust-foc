@@ -9,8 +9,11 @@
 /// PID controller state.  All fields are public — caller reads/writes directly.
 #[derive(Debug, Clone)]
 pub struct Pid {
+    /// Proportional gain.
     pub kp: f32,
+    /// Integral gain.
     pub ki: f32,
+    /// Derivative gain (applied to measurement, not error).
     pub kd: f32,
     /// Symmetric output clamp.  Default: unlimited (`f32::MAX`).
     pub output_limit: f32,

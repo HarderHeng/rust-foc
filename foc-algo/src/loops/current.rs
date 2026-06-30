@@ -4,9 +4,9 @@
 //! Measurements and references are passed directly to `update()` — no field
 //! copying needed.
 
-use crate::pid::Pid;
-use crate::svpwm::{Duty, Svpwm};
-use crate::transforms::{clark_balanced, inv_park, park, Trig};
+use crate::math::pid::Pid;
+use crate::math::svpwm::{Duty, Svpwm};
+use crate::math::transforms::{clark_balanced, inv_park, park, Trig};
 
 /// Per-cycle diagnostic values for logging / VOFA / debug.
 #[derive(Default, Clone, Copy)]
@@ -58,7 +58,7 @@ impl CurrentLoop {
         id_ref: f32, iq_ref: f32,
         dt: f32,
     ) -> Duty {
-        self.svpwm.vdc = self.vdc;
+        self.svpwm.set_vdc(self.vdc);
         let ab = clark_balanced(ia, ib);
         let dq = park::<T>(ab, angle);
         self.runtime.id = dq.d;
@@ -71,7 +71,7 @@ impl CurrentLoop {
         self.runtime.vd = vd;
         self.runtime.vq = vq;
 
-        let v_ab = inv_park::<T>(crate::transforms::Dq { d: vd, q: vq }, angle);
+        let v_ab = inv_park::<T>(crate::math::transforms::Dq { d: vd, q: vq }, angle);
         self.svpwm.update(v_ab.alpha, v_ab.beta);
         self.runtime.duty = self.svpwm.duty;
         self.svpwm.duty
@@ -85,7 +85,7 @@ impl Default for CurrentLoop {
 #[cfg(all(test, feature = "libm-trig"))]
 mod tests {
     use super::*;
-    use crate::transforms::LibmTrig;
+    use crate::math::transforms::LibmTrig;
 
     #[test]
     fn zero_state_centred_duty() {

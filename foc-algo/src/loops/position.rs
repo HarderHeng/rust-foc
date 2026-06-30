@@ -27,7 +27,7 @@
 //! let omega_ref = pos.update(target_pos, measured_pos, measured_vel, measured_accel, dt);
 //! ```
 
-use crate::pid::{self, Pid};
+use crate::math::pid::{self, Pid};
 
 /// Feedforward callback for the position loop.
 ///

@@ -40,12 +40,6 @@ impl Ramp {
         self.value = value;
     }
 
-    /// Read the current ramped value without advancing time.
-    #[must_use]
-    pub fn value(&self) -> f32 {
-        self.value
-    }
-
     /// Reset internal state to a specific value.
     ///
     /// Unlike [`reset`](Self::reset) which always clears to 0, this lets you
@@ -53,6 +47,12 @@ impl Ramp {
     /// where you want to resume from the current measurement).
     pub fn reset_to(&mut self, value: f32) {
         self.value = value;
+    }
+
+    /// Current ramped value (read-only).
+    #[must_use]
+    pub fn value(&self) -> f32 {
+        self.value
     }
 
     /// Advance one step toward `target`, respecting `rate_limit`.

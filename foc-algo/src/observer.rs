@@ -63,7 +63,7 @@
 //! | `pll_kp` | Start at 0.01·ω_max. Higher → faster lock but more jitter. |
 //! | `pll_ki` | Start at kp·100. Higher → faster convergence but possible overshoot. |
 
-use crate::filter::LowPassFilter;
+use crate::math::filter::LowPassFilter;
 use libm::atan2f;
 
 /// SMO configuration — set once at init.
@@ -246,6 +246,26 @@ fn sign(x: f32) -> f32 {
     if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }
 }
 
+// ── PLL tuning ─────────────────────────────────────────────────────────────
+
+/// Type-2 PLL PI gains from desired bandwidth.
+///
+/// For the sensorless observer's angle-tracking PLL.  A higher bandwidth
+/// locks faster but is more sensitive to noise.
+///
+/// ```text
+/// ω_n   = 2π · bandwidth_hz
+/// Kp    = √2 · ω_n        (critical damping ζ ≈ 0.707)
+/// Ki    = ω_n²
+/// ```
+///
+/// Typical values: 10–50 Hz for most PMSMs.
+#[must_use]
+pub fn pll_pi_gains(bandwidth_hz: f32) -> (f32, f32) {
+    let wn = 2.0 * core::f32::consts::PI * bandwidth_hz;
+    (1.414_213_56 * wn, wn * wn)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -322,5 +342,14 @@ mod tests {
         assert!((sign(5.0) - 1.0).abs() < 1e-5);
         assert!((sign(-3.0) + 1.0).abs() < 1e-5);
         assert!((sign(0.0) - 0.0).abs() < 1e-5);
+    }
+
+    // ── PLL tuning ──
+
+    #[test]
+    fn pll_pi_gains_10hz() {
+        let (kp, ki) = pll_pi_gains(10.0);
+        assert!(kp > 80.0 && kp < 100.0);
+        assert!(ki > 3500.0 && ki < 4500.0);
     }
 }

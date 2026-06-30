@@ -117,6 +117,18 @@ pub fn inv_park<T: Trig>(dq: Dq, theta: f32) -> AlphaBeta {
     AlphaBeta { alpha: c * dq.d - s * dq.q, beta: s * dq.d + c * dq.q }
 }
 
+// ── Three-phase helpers ────────────────────────────────────────────────────
+
+/// Reconstruct phase C current from phases A and B under the balanced
+/// three-phase assumption `ia + ib + ic = 0`.
+///
+/// Useful when your ADC only samples two phases — the third is derived.
+#[inline]
+#[must_use]
+pub fn ic_from_iab(ia: f32, ib: f32) -> f32 {
+    -(ia + ib)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

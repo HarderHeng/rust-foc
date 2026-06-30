@@ -27,7 +27,7 @@
 //! let iq_ref = speed.update(target_speed, measured_speed, measured_accel, dt);
 //! ```
 
-use crate::pid::{self, Pid};
+use crate::math::pid::{self, Pid};
 
 /// Feedforward callback for the speed loop.
 ///

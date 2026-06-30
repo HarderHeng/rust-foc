@@ -5,11 +5,11 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-libm = { version = "0.2", default-features = false, optional = true }
+libm = { version = "0.2", default-features = false }
 
 [lib]
 
 [features]
 default = ["libm-trig"]
-libm-trig = ["dep:libm"]
+libm-trig = []
 std = []

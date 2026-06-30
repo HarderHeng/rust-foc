@@ -6,7 +6,7 @@
 //! Phase voltages are derived from αβ via inverse Clarke, inlined to avoid the
 //! intermediate `Abc` struct and extra function call.
 
-use crate::transforms::HALF_SQRT3;
+use crate::math::transforms::HALF_SQRT3;
 
 /// Three-phase duty cycles in [0, 1].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -85,10 +85,9 @@ impl Duty {
 ///
 /// | Field | Layer | Owner |
 /// |-------|-------|-------|
-/// | `vdc` | config | application |
 /// | `duty` | output | controller |
 pub struct Svpwm {
-    pub vdc: f32,
+    vdc: f32,
     pub duty: Duty,
 }
 
@@ -97,6 +96,12 @@ impl Svpwm {
     #[must_use]
     pub fn new(vdc: f32) -> Self {
         Self { vdc, duty: Duty { ta: 0.5, tb: 0.5, tc: 0.5 } }
+    }
+
+    /// Update the bus voltage.  If Vdc changes (e.g. battery droop), call
+    /// this before the next [`update`](Self::update).
+    pub fn set_vdc(&mut self, vdc: f32) {
+        self.vdc = vdc;
     }
 
     /// One modulation step.  Writes `self.duty`.

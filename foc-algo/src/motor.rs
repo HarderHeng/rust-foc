@@ -1,12 +1,14 @@
-//! Motor parameters and tuning helpers.
+//! Motor parameters and PI/PLL auto-tuning.
 //!
-//! Instead of hand-calculating PI gains from first principles every time, pack
-//! your motor's physical constants into [`MotorParams`] and let the library
-//! derive them from your desired control bandwidth.
+//! Instead of hand-calculating PI gains from first principles every time,
+//! pack your motor's physical constants into [`MotorParams`] and let the
+//! library derive them from your desired control bandwidth.
 //!
 //! # Quick start
 //!
 //! ```ignore
+//! use foc_algo::MotorParams;
+//!
 //! let motor = MotorParams {
 //!     r: 0.3,             // 0.3 Ω phase resistance
 //!     ld: 0.0005,         // 0.5 mH d-axis inductance
@@ -19,29 +21,20 @@
 //!
 //! // Current loop: 1000 Hz bandwidth → PI gains
 //! let (kp, ki) = motor.current_pi_gains(1000.0);
-//! ctrl.current_pid_d().kp = kp;
-//! ctrl.current_pid_d().ki = ki;
-//! ctrl.current_pid_q().kp = kp;
-//! ctrl.current_pid_q().ki = ki;
 //!
 //! // Speed loop: 50 Hz bandwidth → PI gains
 //! let (kp, ki) = motor.speed_pi_gains(50.0, 1000.0);
-//! ctrl.speed_pid().kp = kp;
-//! ctrl.speed_pid().ki = ki;
 //!
 //! // Torque reference (SPMSM):
-//! ctrl.target.iq = motor.torque_to_iq(0.5);  // 0.5 N·m
-//!
-//! // For IPM motors, combine with MTPA:
-//! let id_opt = crate::mtpa(flux, lq, ld, iq_abs);
+//! let iq = motor.torque_to_iq(0.5);  // 0.5 N·m
 //! ```
 
 use core::f32::consts::PI;
 
 /// Packed motor physical constants.
 ///
-/// All values in SI units unless noted otherwise.  Fill in once, then use the
-/// methods to derive PI gains, torque references, and field-weakening targets.
+/// All values in SI units unless noted otherwise.  Fill in once, then use
+/// the methods to derive PI gains, torque references, and observer gains.
 #[derive(Clone, Copy, Debug)]
 pub struct MotorParams {
     /// Phase resistance (Ω).  Must be > 0.
@@ -55,8 +48,9 @@ pub struct MotorParams {
     pub flux_linkage: f32,
     /// Number of rotor pole **pairs** (not poles).  7 → 14-pole rotor.
     pub pole_pairs: u8,
-    /// Rated / continuous current (A).  Used for sanity clamping; not enforced
-    /// automatically — read this field in your application-level limit logic.
+    /// Rated / continuous current (A).  Used for sanity clamping; not
+    /// enforced automatically — read this field in your application-level
+    /// limit logic.
     pub rated_current: f32,
     /// Rotor + load inertia (kg·m²).  Used for speed-loop tuning and
     /// inertia-compensating feedforward.
@@ -64,13 +58,13 @@ pub struct MotorParams {
 }
 
 impl MotorParams {
-    // ── PI gain tables ────────────────────────────────────────────────────
+    // ── PI gain derivation ─────────────────────────────────────────────
 
     /// Current-loop PI gains via pole-zero cancellation.
     ///
-    /// Models the stator as an RL load `1/(R + sL)`.  Placing the PI zero at
-    /// the electrical pole (`Ki/Kp = R/L`) cancels it, giving a first-order
-    /// closed-loop response with the specified bandwidth.
+    /// Models the stator as an RL load `1/(R + sL)`.  Placing the PI zero
+    /// at the electrical pole (`Ki/Kp = R/L`) cancels it, giving a
+    /// first-order closed-loop response with the specified bandwidth.
     ///
     /// ```text
     /// ω_c  = 2π · bandwidth_hz
@@ -80,10 +74,10 @@ impl MotorParams {
     ///
     /// Returns `(kp, ki)` suitable for both d- and q-axis current PIs.
     ///
-    /// Uses the **average** inductance `(Ld + Lq) / 2` when the two axes differ
-    /// (IPM motors).  For axes with very different dynamics, tune each axis
-    /// separately with [`current_d_pi_gains`](Self::current_d_pi_gains) and
-    /// [`current_q_pi_gains`](Self::current_q_pi_gains).
+    /// Uses the **average** inductance `(Ld + Lq) / 2` when the two axes
+    /// differ (IPM motors).  For axes with very different dynamics, tune
+    /// each axis separately with [`current_d_pi_gains`](Self::current_d_pi_gains)
+    /// and [`current_q_pi_gains`](Self::current_q_pi_gains).
     #[must_use]
     pub fn current_pi_gains(&self, bandwidth_hz: f32) -> (f32, f32) {
         let l_avg = 0.5 * (self.ld + self.lq);
@@ -112,8 +106,8 @@ impl MotorParams {
 
     /// Speed-loop PI gains via symmetrical optimum.
     ///
-    /// Treats the closed current loop as a first-order lag with time constant
-    /// `τ_i ≈ 1 / ω_ci` and the mechanical plant as `1/(J·s)`.
+    /// Treats the closed current loop as a first-order lag with time
+    /// constant `τ_i ≈ 1 / ω_ci` and the mechanical plant as `1/(J·s)`.
     ///
     /// ```text
     /// ω_cs  = 2π · bandwidth_hz
@@ -179,18 +173,23 @@ impl MotorParams {
         debug_assert!(denom.abs() > 1e-12, "denominator too small — flux may be zero");
         torque / (1.5 * f32::from(self.pole_pairs) * denom)
     }
-}
 
-// ── Free helper functions ───────────────────────────────────────────────────
+    // ── Observer gain derivation ─────────────────────────────────────────
 
-/// Reconstruct phase C current from phases A and B under the balanced
-/// three-phase assumption `ia + ib + ic = 0`.
-///
-/// Useful when your ADC only samples two phases — the third is derived.
-#[inline]
-#[must_use]
-pub fn ic_from_iab(ia: f32, ib: f32) -> f32 {
-    -(ia + ib)
+    /// Sliding-mode observer gain from max expected electrical speed.
+    ///
+    /// ```text
+    /// k_slide = safety_factor · λ_pm · ω_max
+    /// ```
+    ///
+    /// The gain must exceed the maximum possible back-EMF amplitude to
+    /// guarantee sliding-mode convergence.  `safety_factor` is typically
+    /// 1.5–2.0.  `max_speed_rads` is the maximum expected **electrical**
+    /// speed (mechanical speed × pole_pairs).
+    #[must_use]
+    pub fn smo_slide_gain(&self, max_speed_rads: f32, safety_factor: f32) -> f32 {
+        safety_factor * self.flux_linkage * max_speed_rads
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +210,10 @@ mod tests {
             flux_linkage: 0.05, pole_pairs: 4,
             rated_current: 10.0, inertia: 5e-4,
         }
+    }
+
+    fn approx(a: f32, b: f32) {
+        assert!((a - b).abs() < 1e-4, "expected {b}, got {a}");
     }
 
     // ── PI gains ──
@@ -269,19 +272,13 @@ mod tests {
         approx(iq, 20.0);
     }
 
-    // ── Phase C ──
+    // ── SMO gain ──
 
     #[test]
-    fn ic_balanced() {
-        approx(ic_from_iab(1.0, -0.5), -0.5);
-    }
-
-    #[test]
-    fn ic_all_zero() {
-        approx(ic_from_iab(0.0, 0.0), 0.0);
-    }
-
-    fn approx(a: f32, b: f32) {
-        assert!((a - b).abs() < 1e-4, "expected {b}, got {a}");
+    fn smo_slide_gain_formula() {
+        let m = example_spm();
+        // λ=0.01, ω_max=1000, safety=1.5 → 1.5 × 0.01 × 1000 = 15
+        let gain = m.smo_slide_gain(1000.0, 1.5);
+        approx(gain, 15.0);
     }
 }
