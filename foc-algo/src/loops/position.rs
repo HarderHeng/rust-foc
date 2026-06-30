@@ -34,6 +34,11 @@ use crate::math::pid::{self, Pid};
 /// Arguments: `(position_ref, measured_position, measured_velocity, measured_accel)`.
 /// Return: feedforward contribution in rad/s (added to PI output, then
 /// clamped to `pid.output_limit`).
+///
+/// This is a `fn` pointer (not a closure trait object) so the controller
+/// remains `no_std` and allocation-free.  If you need closure capture,
+/// use a plain `fn` shim that closes over static state, or pass the
+/// captured values through `meas` instead.
 pub type PositionFfFn = fn(position_ref: f32, position: f32, velocity: f32, accel: f32) -> f32;
 
 /// Intermediate values for logging / VOFA / debug.

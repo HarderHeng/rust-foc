@@ -27,7 +27,6 @@ pub struct CurrentLoop {
     /// Per-cycle diagnostics: d/q currents, voltages, PI contributions.
     pub runtime: Runtime,
     svpwm: Svpwm,
-    vdc: f32,
 }
 
 impl CurrentLoop {
@@ -37,15 +36,17 @@ impl CurrentLoop {
             d_pid: Pid::new(),
             q_pid: Pid::new(),
             runtime: Runtime::default(),
-            svpwm: Svpwm::new(24.0),
-            vdc: 24.0,
+            // 0 V default — `set_vdc` must be called before `update` for any
+            // meaningful output.  When Vdc = 0, the SVPWM duty collapses to 0
+            // for safety.
+            svpwm: Svpwm::new(0.0),
         }
     }
 
     /// Update the bus voltage.  Call once per cycle before [`update`](Self::update),
     /// or whenever Vdc changes.
     pub fn set_vdc(&mut self, vdc: f32) {
-        self.vdc = vdc;
+        self.svpwm.set_vdc(vdc);
     }
 
     /// One current-loop step.  Returns the new duty cycles and writes
@@ -58,7 +59,6 @@ impl CurrentLoop {
         id_ref: f32, iq_ref: f32,
         dt: f32,
     ) -> Duty {
-        self.svpwm.set_vdc(self.vdc);
         let ab = clark_balanced(ia, ib);
         let dq = park::<T>(ab, angle);
         self.runtime.id = dq.d;
@@ -90,6 +90,7 @@ mod tests {
     #[test]
     fn zero_state_centred_duty() {
         let mut cl = CurrentLoop::new();
+        cl.set_vdc(24.0);
         let d = cl.update::<LibmTrig>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0001);
         approx(d.ta, 0.5);
     }

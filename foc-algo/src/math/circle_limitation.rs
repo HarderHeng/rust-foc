@@ -30,7 +30,7 @@
 //!
 //! ```ignore
 //! let iq_raw = speed.update(speed_ref, meas_speed, meas_accel, dt);
-//! let (id_ref, iq_ref) = circle_limitation(ctrl.target.id_ref, iq_raw, motor.rated_current);
+//! let (id_ref, iq_ref) = circle_limitation(ctrl.target.id_ref, iq_raw, motor.continuous_current);
 //! ctrl.target.id_ref = id_ref;
 //! ctrl.target.iq = iq_ref;
 //! ```

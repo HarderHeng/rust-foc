@@ -35,17 +35,9 @@ impl Ramp {
         Self { rate_limit, value: 0.0 }
     }
 
-    /// Override the internal state (e.g. on initialisation or mode switch).
+    /// Override the internal state (e.g. on initialisation, mode switch, or
+    /// fault recovery where you want to resume from the current measurement).
     pub fn set(&mut self, value: f32) {
-        self.value = value;
-    }
-
-    /// Reset internal state to a specific value.
-    ///
-    /// Unlike [`reset`](Self::reset) which always clears to 0, this lets you
-    /// restart the ramp from a non-zero value (e.g. after a fault recovery
-    /// where you want to resume from the current measurement).
-    pub fn reset_to(&mut self, value: f32) {
         self.value = value;
     }
 
@@ -143,10 +135,9 @@ mod tests {
     }
 
     #[test]
-    fn reset_to_nonzero() {
+    fn set_seeds_nonzero() {
         let mut r = Ramp::new(10.0);
-        r.set(0.0);
-        r.reset_to(5.0);
+        r.set(5.0);
         approx(r.value(), 5.0);
         let v = r.update(10.0, 0.1);
         approx(v, 6.0);

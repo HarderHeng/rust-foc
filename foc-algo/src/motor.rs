@@ -15,7 +15,7 @@
 //!     lq: 0.0005,         // 0.5 mH q-axis inductance (SPMSM)
 //!     flux_linkage: 0.01, // 0.01 Wb
 //!     pole_pairs: 7,
-//!     rated_current: 5.0,
+//!     continuous_current: 5.0,
 //!     inertia: 0.000_01,  // 1e-5 kg·m²
 //! };
 //!
@@ -48,10 +48,18 @@ pub struct MotorParams {
     pub flux_linkage: f32,
     /// Number of rotor pole **pairs** (not poles).  7 → 14-pole rotor.
     pub pole_pairs: u8,
-    /// Rated / continuous current (A).  Used for sanity clamping; not
-    /// enforced automatically — read this field in your application-level
-    /// limit logic.
-    pub rated_current: f32,
+    /// Maximum **continuous** current the motor windings can sustain
+    /// indefinitely without overheating (A).  This is **informational
+    /// only** — the FOC algorithm does not read or enforce it.  Use it in
+    /// your application code:
+    ///
+    /// ```ignore
+    /// ctrl.set_current_limit(motor.continuous_current);
+    /// ```
+    ///
+    /// Short-term peaks above this value are fine if thermal limits (see
+    /// [`I2tLimiter`](crate::I2tLimiter)) say so; the two work in tandem.
+    pub continuous_current: f32,
     /// Rotor + load inertia (kg·m²).  Used for speed-loop tuning and
     /// inertia-compensating feedforward.
     pub inertia: f32,
@@ -200,7 +208,7 @@ mod tests {
         MotorParams {
             r: 0.3, ld: 0.0005, lq: 0.0005,
             flux_linkage: 0.01, pole_pairs: 7,
-            rated_current: 5.0, inertia: 1e-5,
+            continuous_current: 5.0, inertia: 1e-5,
         }
     }
 
@@ -208,7 +216,7 @@ mod tests {
         MotorParams {
             r: 0.2, ld: 0.0003, lq: 0.0008,
             flux_linkage: 0.05, pole_pairs: 4,
-            rated_current: 10.0, inertia: 5e-4,
+            continuous_current: 10.0, inertia: 5e-4,
         }
     }
 

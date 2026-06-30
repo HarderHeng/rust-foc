@@ -9,92 +9,30 @@
 //!
 //! ## Layering
 //!
-//! The controller owns ONE flat set of `Meas` / `Target` / `Runtime` / `Duty`
-//! fields — the single source of truth each cycle.  Inner loops (position,
-//! speed, current) are stateless math blocks beyond their PID integrators and
-//! SVPWM modulator.  Measurements flow **down** as function parameters; the
-//! duty flows **up** as the return value.
+//! The controller owns ONE flat set of `Meas` / `Target` / `ControllerState` /
+//! `Duty` fields — the single source of truth each cycle.  Inner loops
+//! (position, speed, current) are stateless math blocks beyond their PID
+//! integrators and SVPWM modulator.  Measurements flow **down** as function
+//! parameters; the duty flows **up** as the return value.
 //!
 //! Three optional [`Ramp`](crate::math::ramp::Ramp) rate limiters sit between
 //! reference sources and their loops.  Each defaults to `rate_limit = 0`
 //! (disabled — instant tracking).  Set a positive rate to soften step changes.
 
-use crate::math::circle_limitation::circle_limitation;
 use crate::loops::current::CurrentLoop;
-use crate::math::pid::Pid;
 use crate::loops::position::{PositionFfFn, PositionLoopController};
-use crate::math::ramp::Ramp;
 use crate::loops::speed::{SpeedFfFn, SpeedLoopController};
-use crate::math::svpwm::Duty;
-use crate::math::transforms::Trig;
+use crate::math::{circle_limitation, Duty, Pid, Ramp, Trig};
+use crate::state::{ControllerState, Meas, Target};
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum Mode { #[default] Off, Torque, Speed, Position }
 
-/// User-setpoint for the active mode.  Only one of these is read at a time,
-/// based on `mode`:
-/// - `Mode::Torque`   → `iq`
-/// - `Mode::Speed`    → `speed_ref`
-/// - `Mode::Position` → `position`
-/// `id_ref` is consumed by the current loop in every non-Off mode (use it
-/// for MTPA / field-weakening).
-#[derive(Default, Clone, Copy)]
-pub struct Target {
-    /// Q-axis current setpoint (A).  Used in `Mode::Torque`.
-    pub iq: f32,
-    /// Mechanical speed setpoint (rad/s).  Used in `Mode::Speed`.
-    pub speed_ref: f32,
-    /// Mechanical position setpoint (rad).  Used in `Mode::Position`.
-    pub position: f32,
-    /// D-axis current reference (A).  Usually ≤ 0 for MTPA / field
-    /// weakening.  Applied in every non-Off mode.
-    pub id_ref: f32,
-}
-
-/// Sensor inputs to the controller.  Fill in once per control cycle before
-/// calling [`FocController::update`].
-#[derive(Default, Clone, Copy)]
-pub struct Meas {
-    /// Mechanical position (rad).  Used in `Mode::Position`.
-    pub position: f32,
-    /// Mechanical speed (rad/s).  Used in `Mode::Speed` and as feedforward
-    /// input to the position loop.
-    pub speed: f32,
-    /// Mechanical acceleration (rad/s²).  Used as feedforward input to
-    /// the speed loop.
-    pub accel: f32,
-    /// Phase A current (A).  From ADC.
-    pub ia: f32,
-    /// Phase B current (A).  From ADC.  Phase C is derived.
-    pub ib: f32,
-    /// Rotor **electrical** angle (radians).  From encoder / observer.
-    pub theta: f32,
-    /// DC bus voltage (V).  0 triggers a safe zero-duty fallback.
-    pub vdc: f32,
-}
-
-#[derive(Default, Clone, Copy)]
-pub struct Runtime {
-    /// Iq target after the cascaded loops (pre circle-limiter).
-    pub iq_target: f32,
-    /// Id reference after circle limitation — what actually enters the
-    /// current loop.  Equals `target.id_ref` when the limiter is disabled
-    /// or the input vector is already inside the circle.
-    pub id_command: f32,
-    /// Iq reference after circle limitation — what actually enters the
-    /// current loop.  Differs from `iq_target` only when the limiter is
-    /// active.
-    pub iq_command: f32,
-    pub speed_target: f32,
-    /// True when circle limitation reduced the current vector this cycle.
-    pub current_limited: bool,
-}
-
 pub struct FocController {
-    pub mode: Mode,
+    mode: Mode,
     pub target: Target,
     pub meas: Meas,
-    pub runtime: Runtime,
+    pub runtime: ControllerState,
     pub duty: Duty,
 
     /// Rate limiter on the position reference.  `rate_limit` is in rad/s
@@ -105,13 +43,14 @@ pub struct FocController {
     pub speed_ramp: Ramp,
     /// Rate limiter on the Iq reference.  `rate_limit` is in A/s
     /// (max change per second).  Applied last, before the current loop,
-    /// in every non-Off mode.
+    /// in every non-Off mode.  Default: 1000 A/s — safe for small PMSMs
+    /// (≈1 A per cycle at 1 kHz control).
     pub iq_ramp: Ramp,
 
     /// Maximum allowed current vector magnitude (A).  0 = no limit.  When > 0,
     /// the controller applies circle limitation to (id, iq) before the
     /// current loop, ensuring `id² + iq² ≤ current_limit²`.
-    pub current_limit: f32,
+    current_limit: f32,
 
     /// When `true`, switching to `Mode::Off` clears all PI integrators and
     /// ramp state — the controller starts "fresh" on the next non-Off
@@ -125,7 +64,7 @@ pub struct FocController {
     ///
     /// Use `true` for hard stops (e.g. E-stop).  Use `false` for normal
     /// enable/disable.
-    pub reset_on_off: bool,
+    reset_on_off: bool,
 
     position: PositionLoopController,
     speed: SpeedLoopController,
@@ -145,11 +84,14 @@ impl FocController {
             mode,
             target: Target::default(),
             meas: Meas::default(),
-            runtime: Runtime::default(),
+            runtime: ControllerState::default(),
             duty: Duty::default(),
             pos_ramp: Ramp::default(),
             speed_ramp: Ramp::default(),
-            iq_ramp: Ramp::default(),
+            // iq_ramp defaults to 1000 A/s — a safe slew rate for small
+            // PMSMs that prevents mechanical shock from instant torque
+            // step changes.  Override with `ctrl.iq_ramp.rate_limit = ...`.
+            iq_ramp: Ramp::new(1000.0),
             current_limit: 0.0,
             reset_on_off: false,
             position: PositionLoopController::default(),
@@ -315,6 +257,32 @@ impl FocController {
         self.position.ff_callback = cb;
     }
 
+    // ── Configuration accessors (read-only) ──
+
+    /// Current operating mode.
+    #[must_use]
+    pub fn mode(&self) -> Mode { self.mode }
+
+    /// Switch operating mode.  Ramps are seeded from current measurements
+    /// on the next `update()` call for bumpless transfer.
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+    }
+
+    /// Current circle-limitation threshold (A).  0 = disabled.
+    #[must_use]
+    pub fn current_limit(&self) -> f32 { self.current_limit }
+
+    /// True when `Mode::Off` clears PI state (hard stop).  False = soft off
+    /// (preserve integrators for fault recovery).
+    #[must_use]
+    pub fn reset_on_off(&self) -> bool { self.reset_on_off }
+
+    /// Set whether `Mode::Off` clears PI state.  See [`reset_on_off`].
+    pub fn set_reset_on_off(&mut self, reset: bool) {
+        self.reset_on_off = reset;
+    }
+
     // ── Runtime diagnostics (read-only) ──
 
     /// Speed-loop per-cycle diagnostics: PI output, feedforward, measurement.
@@ -341,6 +309,9 @@ mod tests {
     fn make(mode: Mode) -> FocController {
         let mut c = FocController::new(mode);
         c.meas.vdc = 24.0;
+        // Disable iq_ramp by default — most tests don't care about slew
+        // limiting.  Specific ramp tests override below.
+        c.iq_ramp.rate_limit = 0.0;
         c
     }
 
@@ -386,7 +357,7 @@ mod tests {
         c.target.speed_ref = 2.0;
         c.update::<LibmTrig>(0.0001);
         approx(c.runtime.iq_target, 2.0);
-        c.mode = Mode::Off;
+        c.set_mode(Mode::Off);
         c.update::<LibmTrig>(0.0001);
         approx(c.duty.ta, 0.0);
     }
@@ -398,7 +369,7 @@ mod tests {
         c.target.speed_ref = 1.0;
         c.update::<LibmTrig>(0.1);
         assert!(c.speed.pid.integral != 0.0);
-        c.mode = Mode::Off;
+        c.set_mode(Mode::Off);
         c.update::<LibmTrig>(0.0001);
         approx(c.speed.pid.integral, 0.0);
         approx(c.current.d_pid.integral, 0.0);
@@ -413,7 +384,7 @@ mod tests {
         c.update::<LibmTrig>(0.1);
         let integral_before = c.speed.pid.integral;
         assert!(integral_before != 0.0);
-        c.mode = Mode::Off;
+        c.set_mode(Mode::Off);
         c.update::<LibmTrig>(0.0001);
         approx(c.duty.ta, 0.0);
         approx(c.speed.pid.integral, integral_before);
@@ -465,7 +436,7 @@ mod tests {
         c.speed_ramp.rate_limit = 100.0;
         c.speed_ramp.set(50.0);
         c.reset();
-        c.mode = Mode::Speed;
+        c.set_mode(Mode::Speed);
         c.speed_pid().kp = 1.0;
         c.target.speed_ref = 0.0;
         c.update::<LibmTrig>(0.001);
@@ -475,7 +446,7 @@ mod tests {
     #[test] fn mode_switch_seeds_speed_ramp() {
         let mut c = make(Mode::Torque);
         c.meas.speed = 50.0;
-        c.mode = Mode::Speed;
+        c.set_mode(Mode::Speed);
         c.speed_pid().kp = 1.0;
         c.speed_ramp.rate_limit = 10.0;
         c.target.speed_ref = 50.0;
@@ -509,10 +480,10 @@ mod tests {
 
     #[test] fn circle_limit_disabled_passes_through() {
         let mut c = make(Mode::Torque);
+        c.iq_ramp.rate_limit = 0.0;  // disable ramp for this test
         c.target.iq = 100.0;
         c.update::<LibmTrig>(0.001);
         assert!(!c.runtime.current_limited);
-        // iq_command == iq_target == user setpoint when limiter off
         approx(c.runtime.iq_command, c.runtime.iq_target);
         approx(c.runtime.iq_command, 100.0);
     }
@@ -552,7 +523,7 @@ mod tests {
         c.target.iq = 10.0;
         c.update::<LibmTrig>(0.001);
         assert!(c.runtime.current_limited);
-        c.mode = Mode::Off;
+        c.set_mode(Mode::Off);
         c.update::<LibmTrig>(0.001);
         assert!(!c.runtime.current_limited);
     }
@@ -594,7 +565,7 @@ mod tests {
         let motor = MotorParams {
             r: 0.3, ld: 0.0005, lq: 0.0005,
             flux_linkage: 0.01, pole_pairs: 7,
-            rated_current: 5.0, inertia: 1e-5,
+            continuous_current: 5.0, inertia: 1e-5,
         };
 
         let (kp_i, ki_i) = motor.current_pi_gains(1000.0);
@@ -603,7 +574,8 @@ mod tests {
         let (kp_pll, ki_pll) = pll_pi_gains(20.0);
 
         let mut ctrl = FocController::new(Mode::Speed);
-        ctrl.set_current_limit(motor.rated_current);
+        ctrl.set_current_limit(motor.continuous_current);
+        ctrl.iq_ramp.rate_limit = 0.0;  // disable ramp for smoke test
         ctrl.speed_pid().kp = kp_s;
         ctrl.speed_pid().ki = ki_s;
         ctrl.current_pid_d().kp = kp_i;
@@ -637,7 +609,7 @@ mod tests {
 
             let (id_c, iq_c) = circle_limitation(
                 ctrl.target.id_ref, ctrl.target.iq,
-                motor.rated_current,
+                motor.continuous_current,
             );
             ctrl.target.id_ref = id_c;
             ctrl.target.iq = iq_c;

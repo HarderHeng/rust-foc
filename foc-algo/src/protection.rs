@@ -1,4 +1,9 @@
-//! Motor startup helpers — rotor alignment and thermal protection.
+//! Motor protection helpers — thermal foldback and rotor alignment.
+//!
+//! The historical name `startup` was misleading: this module is mostly about
+//! protecting the motor from overcurrent / thermal damage, not just the
+//! startup phase.  The rotor-alignment procedure in the module doc is the
+//! only piece that's truly startup-related.
 //!
 //! # Rotor alignment strategies
 //!
@@ -162,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn i2t_rated_current_no_heating() {
+    fn i2t_continuous_current_no_heating() {
         let mut lim = I2tLimiter::new(10.0, 50.0, 0.5);
         for _ in 0..100 {
             let _ = lim.foldback(10.0, 0.001);
