@@ -4,7 +4,7 @@
 //! Each packet CRC16-validated; full image CRC-32/ISO-HDLC validated at end.
 
 use crate::crc::{crc32_finalize, crc32_init, crc32_update};
-use crate::flash::{FlashError, Stm32g4Flash};
+use crate::flash::Stm32g4Flash;
 use crate::uart::{uart_read_byte_timeout, uart_write_byte, uart_write_str};
 use embedded_storage::nor_flash::ReadNorFlash;
 use embedded_storage::nor_flash::NorFlash;
@@ -31,10 +31,8 @@ pub enum YmodemError {
     InvalidPacket,
     CrcMismatch,
     ImageTooLarge,
-    #[allow(dead_code)]
-    Flash(FlashError),
-    #[allow(dead_code)]
-    NotImplemented,
+    /// Flash erase/programming error bubbled up from the driver.
+    Flash,
 }
 
 fn crc16_ccitt(data: &[u8]) -> u16 {
@@ -170,7 +168,7 @@ pub fn receive_image(flash: &mut Stm32g4Flash) -> Result<(), YmodemError> {
                     for b in write_buf[write_len..aligned_len].iter_mut() { *b = 0xFF; }
 
                     flash.write(flash_offset, &write_buf[..aligned_len])
-                        .map_err(YmodemError::Flash)?;
+                        .map_err(|_| YmodemError::Flash)?;
                     flash_offset += aligned_len as u32;
                     bytes_received += write_len;
                 }
@@ -200,7 +198,7 @@ pub fn receive_image(flash: &mut Stm32g4Flash) -> Result<(), YmodemError> {
 
     let expected_addr = flash_offset - CRC32_FOOTER_LEN as u32;
     let mut expected_bytes = [0u8; CRC32_FOOTER_LEN];
-    flash.read(expected_addr, &mut expected_bytes).map_err(YmodemError::Flash)?;
+    flash.read(expected_addr, &mut expected_bytes).map_err(|_| YmodemError::Flash)?;
     let expected = u32::from_le_bytes(expected_bytes);
 
     if computed != expected {

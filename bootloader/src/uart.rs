@@ -17,12 +17,6 @@ pub fn uart_try_read() -> Option<u8> {
 }
 
 #[inline(never)]
-#[allow(dead_code)]
-pub fn uart_read_byte() -> u8 {
-    loop { if let Some(b) = uart_try_read() { return b; } }
-}
-
-#[inline(never)]
 pub fn uart_read_byte_timeout(timeout_ms: u32) -> Result<u8, ()> {
     for _ in 0..timeout_ms {
         if let Some(b) = uart_try_read() { return Ok(b); }
