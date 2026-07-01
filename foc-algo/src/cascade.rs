@@ -172,6 +172,8 @@ impl FocController {
         self.runtime.id_command = id_cmd;
         self.runtime.demag_limited = demag_limited;
 
+        // 5. Feedforward decoupling (optional).  Zero output when
+        //    decoupling is off or no motor parameters are set.
         let (vd_ff, vq_ff) = if self.decoupling {
             if let Some(m) = self.motor {
                 let omega_e = self.meas.speed * f32::from(m.pole_pairs);
@@ -273,9 +275,13 @@ impl FocController {
         (id, iq, was_limited)
     }
 
-    /// Clear all PI integrators, ramp state, and observer seed values.
-    /// Most users should prefer the soft-off behaviour of `Mode::Off`
-    /// with `reset_on_off = true` instead of calling this directly.
+    /// Clear all PI integrators and ramp state.  Most users should prefer
+    /// the soft-off behaviour of `Mode::Off` with `reset_on_off = true`
+    /// instead of calling this directly.
+    ///
+    /// Configuration (gains, limits, `v_max`, `motor`, `decoupling`,
+    /// `i_demag`, `current_limit`, `reset_on_off`, ramps' `rate_limit`) is
+    /// preserved — only integrator/ramp *state* is cleared.
     pub(crate) fn reset(&mut self) {
         self.position.reset();
         self.speed.reset();
@@ -313,6 +319,12 @@ impl FocController {
     /// [`enable_decoupling`](Self::enable_decoupling); ignored otherwise.
     pub fn set_motor(&mut self, motor: MotorParams) {
         self.motor = Some(motor);
+    }
+
+    /// Active motor parameters, if [`set_motor`](Self::set_motor) was called.
+    #[must_use]
+    pub fn motor(&self) -> Option<&MotorParams> {
+        self.motor.as_ref()
     }
 
     /// Enable (`true`) or disable (`false`) dq-axis feedforward voltage

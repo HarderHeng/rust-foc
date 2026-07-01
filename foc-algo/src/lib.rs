@@ -15,10 +15,10 @@
 //! 2. **[`MotorParams`]** — pack your motor's physical constants once, then
 //!    call its `current_pi_gains` / `speed_pi_gains` / `torque_to_iq`
 //!    methods to derive everything else.
-//! 3. **Helpers** — [`field_weakening`] for high-speed `id` reference,
+//! 3. **Helpers** — [`field_weakening`] / `mtpa` for high-speed `id`
+//!    reference, [`decoupling_voltage`] for cross-coupling compensation,
 //!    [`SmoObserver`] for sensorless angle, [`I2tLimiter`] for thermal
-//!    foldback, [`decoupling_voltage`] for high-speed cross-coupling
-//!    compensation.
+//!    foldback.
 //!
 //! The inner loops ([`SpeedLoopController`], [`PositionLoopController`],
 //! [`CurrentLoop`]) are exposed for users who want to assemble their own
@@ -84,7 +84,8 @@
 //!     ├── ramp.rs         rate limiter
 //!     ├── svpwm.rs        space-vector modulation
 //!     ├── transforms.rs   Clarke/Park + 3-phase helpers
-//!     └── circle_limitation.rs  vector amplitude clamp
+//!     ├── circle_limitation.rs  vector amplitude clamp
+//!     └── decoupling.rs   PMSM dq-axis feedforward voltages
 //! ```
 
 #![no_std]
