@@ -69,4 +69,8 @@ pub struct ControllerState {
     pub speed_target: f32,
     /// True when circle limitation reduced the current vector this cycle.
     pub current_limited: bool,
+    /// True when the demagnetization floor clamped `id_cmd` upward this
+    /// cycle (i.e. field weakening demanded a more-negative `Id` than the
+    /// motor's magnet could survive).
+    pub demag_limited: bool,
 }

@@ -62,6 +62,20 @@ pub struct FocController {
     /// PMSMs where the coupling is negligible.
     decoupling: bool,
 
+    /// Negative d-axis current floor for demagnetization protection (A).
+    /// 0 (or any positive value) disables the check.
+    ///
+    /// PMSM permanent magnets have a maximum reverse field.  Field
+    /// weakening (and aggressive MTPA) can ask for very negative `Id`;
+    /// if the rotor magnet has a `-I_demag` rating, the controller must
+    /// not command more.  When non-zero:
+    ///
+    ///   `id_cmd = max(id_cmd, i_demag)`   // i_demag ≤ 0
+    ///
+    /// Typical: −2 to −5× the motor's continuous current, per the magnet
+    /// datasheet.
+    i_demag: f32,
+
     /// When `true`, switching to `Mode::Off` clears all PI integrators and
     /// ramp state — the controller starts "fresh" on the next non-Off
     /// transition.
@@ -106,6 +120,7 @@ impl FocController {
             reset_on_off: false,
             motor: None,
             decoupling: false,
+            i_demag: 0.0,
             position: PositionLoopController::default(),
             speed: SpeedLoopController::default(),
             current: CurrentLoop::new(),
@@ -147,8 +162,16 @@ impl FocController {
         self.runtime.iq_command = iq_cmd;
         self.runtime.current_limited = limited;
 
-        // 5. Feedforward decoupling (optional).  Zero output when
-        //    decoupling is off or no motor parameters are set.
+        // 4b. Demag protection — clamp Id upward to prevent rotor damage.
+        //     Positive (or zero) `i_demag` disables the check.
+        let (id_cmd, demag_limited) = if self.i_demag < 0.0 && id_cmd < self.i_demag {
+            (self.i_demag, true)
+        } else {
+            (id_cmd, false)
+        };
+        self.runtime.id_command = id_cmd;
+        self.runtime.demag_limited = demag_limited;
+
         let (vd_ff, vq_ff) = if self.decoupling {
             if let Some(m) = self.motor {
                 let omega_e = self.meas.speed * f32::from(m.pole_pairs);
@@ -162,6 +185,8 @@ impl FocController {
 
         // 6. Current loop → PWM duty
         self.current.set_vdc(self.meas.vdc);
+        // Keep SVPWM in its linear region: limit |Vdq| ≤ vdc / √3.
+        self.current.set_v_max(self.meas.vdc * crate::math::transforms::INV_SQRT_3);
         self.duty = self.current.update::<T>(
             self.meas.ia, self.meas.ib, self.meas.theta,
             id_cmd, iq_cmd,
@@ -189,6 +214,7 @@ impl FocController {
         self.runtime.id_command = 0.0;
         self.runtime.speed_target = 0.0;
         self.runtime.current_limited = false;
+        self.runtime.demag_limited = false;
         self.duty = Duty { ta: 0.0, tb: 0.0, tc: 0.0 };
         if self.reset_on_off {
             self.reset();
@@ -305,6 +331,20 @@ impl FocController {
     #[must_use]
     pub fn decoupling_enabled(&self) -> bool {
         self.decoupling
+    }
+
+    /// Set the demagnetization protection floor for `id_cmd` (A).  Pass
+    /// `0.0` (default) to disable; pass a negative value to enforce a lower
+    /// bound.  See the [`i_demag`](Self) field doc for the rationale and
+    /// typical values.
+    pub fn set_demag_current(&mut self, i_demag: f32) {
+        self.i_demag = i_demag;
+    }
+
+    /// Active demag floor (A).  Returns ≤ 0 when enabled, > 0 when disabled.
+    #[must_use]
+    pub fn demag_current(&self) -> f32 {
+        self.i_demag
     }
 
     // ── Configuration accessors (read-only) ──
@@ -526,6 +566,61 @@ mod tests {
         approx(c.duty.ta, duty_before.ta);
     }
 
+    // ── Demag protection ──
+
+    #[test]
+    fn demag_disabled_by_default() {
+        approx(make(Mode::Torque).demag_current(), 0.0);
+    }
+
+    #[test]
+    fn demag_disabled_passes_through_negative_id() {
+        // i_demag = 0 → no clamp; id_ref = -20 must survive unchanged.
+        let mut c = make(Mode::Torque);
+        c.iq_ramp.rate_limit = 0.0;
+        c.target.id_ref = -20.0;
+        c.update::<LibmTrig>(0.001);
+        approx(c.runtime.id_command, -20.0);
+        assert!(!c.runtime.demag_limited);
+    }
+
+    #[test]
+    fn demag_clamps_id_upward_when_exceeded() {
+        let mut c = make(Mode::Torque);
+        c.iq_ramp.rate_limit = 0.0;
+        c.set_demag_current(-5.0);
+        c.target.id_ref = -20.0;
+        c.update::<LibmTrig>(0.001);
+        // id_cmd clamped from -20 to -5
+        approx(c.runtime.id_command, -5.0);
+        assert!(c.runtime.demag_limited);
+    }
+
+    #[test]
+    fn demag_does_not_pull_id_below_desired() {
+        // id_ref = -3, demag = -5 → no clamp (id > demag floor)
+        let mut c = make(Mode::Torque);
+        c.iq_ramp.rate_limit = 0.0;
+        c.set_demag_current(-5.0);
+        c.target.id_ref = -3.0;
+        c.update::<LibmTrig>(0.001);
+        approx(c.runtime.id_command, -3.0);
+        assert!(!c.runtime.demag_limited);
+    }
+
+    #[test]
+    fn demag_off_clears_flag() {
+        let mut c = make(Mode::Torque);
+        c.iq_ramp.rate_limit = 0.0;
+        c.set_demag_current(-5.0);
+        c.target.id_ref = -20.0;
+        c.update::<LibmTrig>(0.001);
+        assert!(c.runtime.demag_limited);
+        c.set_mode(Mode::Off);
+        c.update::<LibmTrig>(0.001);
+        assert!(!c.runtime.demag_limited);
+    }
+
     // ── Circle limitation ──
 
     #[test] fn circle_limit_disabled_passes_through() {
@@ -645,9 +740,12 @@ mod tests {
         // FF used the *commanded* currents (post circle-limit), not measured.
         approx(rt.vd_ff, -omega_e * 0.0008 * 5.0);
         approx(rt.vq_ff,  omega_e * 0.01); // Id_cmd = 0, so Ld·Id term vanishes
-        // Total applied voltage = PI + FF.
-        approx(rt.vd, rt.pi_d_output + rt.vd_ff);
-        approx(rt.vq, rt.pi_q_output + rt.vq_ff);
+        // The voltage-domain circle limit clips the (PI + FF) total because
+        // |Vdq_raw| ≈ 75 V exceeds vdc / √3 ≈ 13.86 V (vdc = 24).
+        assert!(rt.voltage_limited, "voltage limit must have engaged");
+        let v_lim = 24.0 * crate::math::transforms::INV_SQRT_3;
+        let mag = (rt.vd.powi(2) + rt.vq.powi(2)).sqrt();
+        assert!((mag - v_lim).abs() < 1e-3, "mag={mag} should be ≈{v_lim}");
     }
 
     // ── End-to-end smoke test ─────────────────────────────────────────

@@ -12,7 +12,8 @@ use libm::{cosf, sinf};
 
 /// `√3/2` — precomputed half-sqrt3 for Clarke transforms and SVPWM.
 pub(crate) const HALF_SQRT3: f32 = 0.866_025_4;
-const INV_SQRT_3: f32 = 0.577_350_27;
+/// `1/√3` — linear-modulation boundary for centred SVM (`vdc / √3`).
+pub(crate) const INV_SQRT_3: f32 = 0.577_350_27;
 const TWO_THIRDS: f32 = 2.0 / 3.0;
 
 /// Pluggable trig provider for the Park transforms.
