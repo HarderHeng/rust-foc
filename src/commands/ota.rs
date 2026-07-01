@@ -4,7 +4,7 @@ use cortex_m::peripheral::SCB;
 
 use foc_common::{FlashOtaFlag, OtaFlag, OTA_FLAG_ADDRESS};
 
-use crate::drivers::flash::Stm32g4Flash;
+use foc_common::Stm32g4Flash;
 
 /// Execute OTA update: write flag, print message, reset.
 pub fn run_ota_update<W, E>(cli: &mut embedded_cli::cli::CliHandle<'_, W, E>)

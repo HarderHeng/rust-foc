@@ -73,8 +73,12 @@ pub async fn shell_task(tx: BufferedUartTx<'static>, mut rx: BufferedUartRx<'sta
         let mut buf = [0u8; 1];
         match rx.read(&mut buf).await {
             Ok(_) => {}
-            Err(_) => {
-                // Read error (framing, overrun, etc.) — skip and retry.
+            Err(e) => {
+                // Framing/overrun errors are common on noisy USB-serial
+                // bridges; log once-per-error and skip the byte.  The
+                // CLI line editor recovers automatically on the next
+                // valid byte.
+                defmt::warn!("USART2 read error: {:?}", e);
                 continue;
             }
         }

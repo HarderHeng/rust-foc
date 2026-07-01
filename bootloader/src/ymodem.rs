@@ -4,7 +4,7 @@
 //! Each packet CRC16-validated; full image CRC-32/ISO-HDLC validated at end.
 
 use crate::crc::{crc32_finalize, crc32_init, crc32_update};
-use crate::flash::Stm32g4Flash;
+use foc_common::Stm32g4Flash;
 use crate::uart::{uart_read_byte_timeout, uart_write_byte, uart_write_str};
 use embedded_storage::nor_flash::ReadNorFlash;
 use embedded_storage::nor_flash::NorFlash;

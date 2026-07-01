@@ -4,10 +4,6 @@
 //! constants and an `board_init()` function that takes raw HAL
 //! peripherals and returns typed handles ready to be moved into tasks.
 
-// The board constants are part of the public BSP API; tasks 6/7 will
-// reference them. Suppress dead-code warnings until they are consumed.
-#![allow(dead_code)]
-
 use embassy_stm32::{
     bind_interrupts,
     peripherals::USART2,
@@ -31,13 +27,10 @@ pub type DebugUartSink = Uart2Sink<BufferedUart<'static>>;
 
 pub const BOARD_NAME: &str = "B-G431B-ESC1";
 pub const BOARD_MCU: &str = "STM32G431CBU6";
+pub const FLASH_SIZE_KB: u32 = 128;
+pub const SRAM_SIZE_KB: u32 = 32;
 
 pub const DEBUG_UART_BAUD: u32 = 921_600;
-pub const DEBUG_UART_TX_PORT: char = 'B';
-pub const DEBUG_UART_TX_PIN: u8 = 3;
-pub const DEBUG_UART_RX_PORT: char = 'B';
-pub const DEBUG_UART_RX_PIN: u8 = 4;
-pub const DEBUG_UART_AF: u8 = 7;
 
 pub const DEBUG_UART_TX_BUF_SIZE: usize = 256;
 pub const DEBUG_UART_RX_BUF_SIZE: usize = 64;
@@ -94,6 +87,10 @@ pub fn board_init(p: Peripherals) -> BoardHandles {
     cfg.baudrate = DEBUG_UART_BAUD;
 
     let buffered: BufferedUart<'static> = BufferedUart::new(
+        // Pin assignments are hardcoded below; embassy-stm32 takes
+        // concrete peripheral pins at compile time, not runtime values,
+        // so the constants for these would be documentation-only.
+        // B-G431B-ESC1 schematic: USART2 = PB3 (TX), PB4 (RX), AF7.
         p.USART2,
         p.PB4, // RX
         p.PB3, // TX

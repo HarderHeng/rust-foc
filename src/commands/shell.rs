@@ -10,6 +10,7 @@
 use cortex_m::peripheral::SCB;
 use embedded_cli::cli::CliHandle;
 
+use crate::bsp::{BOARD_MCU, BOARD_NAME, FLASH_SIZE_KB, SRAM_SIZE_KB};
 use crate::commands::ota::run_ota_update;
 
 // ---------------------------------------------------------------------------
@@ -54,6 +55,30 @@ pub enum ShellCommand {
 /// parsed `ShellCommand` variant. It must return `Result<(), E>` where `E`
 /// is the writer's error type (the `embedded-cli` derive macro handles the
 /// conversion to `ProcessError` internally).
+
+/// Decimal `u32` formatter.  Writes digits one byte at a time, so no
+/// buffer is allocated and no allocator is required.
+fn write_u32<W, E>(cli: &mut CliHandle<'_, W, E>, mut n: u32)
+where
+    W: embedded_cli::__private::io::Write<Error = E>,
+    E: embedded_cli::__private::io::Error,
+{
+    if n == 0 {
+        let _ = cli.writer().write_str("0");
+        return;
+    }
+    let mut digits = [0u8; 10];
+    let mut i = digits.len();
+    while n > 0 {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    // Safe: each byte is `b'0'..=b'9'`, all ASCII.
+    let s = core::str::from_utf8(&digits[i..]).unwrap_or("?");
+    let _ = cli.writer().write_str(s);
+}
+
 pub fn make_processor<W, E>() -> impl embedded_cli::service::CommandProcessor<W, E>
 where
     W: embedded_cli::__private::io::Write<Error = E>,
@@ -71,9 +96,16 @@ where
                 let _ = cli.writer().write_str("\r\n");
             }
             ShellCommand::Info => {
-                let _ = cli.writer().write_str("STM32G431CBU6\r\n");
-                let _ = cli.writer().write_str("  flash: 128 KB\r\n");
-                let _ = cli.writer().write_str("  sram:  32 KB\r\n");
+                let _ = cli.writer().write_str(BOARD_NAME);
+                let _ = cli.writer().write_str("\r\n");
+                let _ = cli.writer().write_str(BOARD_MCU);
+                let _ = cli.writer().write_str("\r\n");
+                let _ = cli.writer().write_str("  flash: ");
+                let _ = write_u32(cli, FLASH_SIZE_KB);
+                let _ = cli.writer().write_str(" KB\r\n");
+                let _ = cli.writer().write_str("  sram:  ");
+                let _ = write_u32(cli, SRAM_SIZE_KB);
+                let _ = cli.writer().write_str(" KB\r\n");
             }
             ShellCommand::Reboot => {
                 let _ = cli.writer().write_str("Rebooting...\r\n");

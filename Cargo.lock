@@ -632,6 +632,7 @@ name = "foc-common"
 version = "0.1.0"
 dependencies = [
  "defmt 1.1.0",
+ "embassy-stm32",
  "embedded-storage",
 ]
 

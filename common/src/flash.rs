@@ -1,16 +1,31 @@
-//! STM32G4 flash driver for the app side.
+//! STM32G4 flash driver implementing `embedded_storage::NorFlash`.
 //!
-//! Wraps `embassy_stm32::pac` for page erase and 64-bit programming.
-//! This is the same low-level approach as the bootloader's `flash.rs`
-//! but deployed in the app crate. Uses absolute addresses
-//! (compatible with `foc_common::FlashOtaFlag`).
+//! Feature-gated behind `flash-driver` because pulling in `embassy-stm32`
+//! is heavy (target-specific, large dep tree).  Both the bootloader and
+//! the app enable it.
+//!
+//! Uses raw STM32G4 PAC access for page erase and 64-bit programming.
+//! STM32G4 page size is 2 KB.
+//!
+//! SAFETY: callers must guarantee exclusive access — `NorFlash` requires
+//! `&mut self`.  In single-threaded init contexts this is trivially safe;
+//! in async contexts, route through an `embassy_sync::Mutex` or similar.
 
 use core::ptr::{read_volatile, write_volatile};
-use embedded_storage::nor_flash::{ErrorType, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash};
+
+#[cfg(feature = "flash-driver")]
 use embassy_stm32::pac;
+#[cfg(feature = "flash-driver")]
+use embedded_storage::nor_flash::{
+    ErrorType, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash,
+};
 
 /// Flash error type for the STM32G4 driver.
-#[derive(Debug, defmt::Format)]
+///
+/// Derives `defmt::Format` only when the `defmt-format` feature is on
+/// (app-side ergonomic); bootloader doesn't use defmt.
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt-format", derive(defmt::Format))]
 pub enum FlashError {
     /// Address or length not aligned to WRITE_SIZE / ERASE_SIZE / READ_SIZE.
     Unaligned,
@@ -18,6 +33,7 @@ pub enum FlashError {
     OutOfBounds,
 }
 
+#[cfg(feature = "flash-driver")]
 impl NorFlashError for FlashError {
     fn kind(&self) -> NorFlashErrorKind {
         match self {
@@ -29,20 +45,25 @@ impl NorFlashError for FlashError {
 
 /// STM32G4 flash driver.
 ///
-/// All operations take `&mut self` to satisfy the `NorFlash` trait's exclusive
-/// access requirement. Uses raw PAC access, so absolute addresses are used.
+/// Holds no state of its own — backing registers are globals.  The
+/// `_phantom` ZST exists only to anchor the lifetime for trait impls.
+#[cfg(feature = "flash-driver")]
 pub struct Stm32g4Flash {
     _phantom: core::marker::PhantomData<()>,
 }
 
+#[cfg(feature = "flash-driver")]
 impl Stm32g4Flash {
     pub fn new() -> Self {
         Self { _phantom: core::marker::PhantomData }
     }
 
     #[inline]
-    fn pac() -> pac::flash::Flash { pac::FLASH }
+    fn pac() -> pac::flash::Flash {
+        pac::FLASH
+    }
 
+    /// Unlock flash: write key1 (0x4567_0123) then key2 (0xCDEF_89AB) to KEYR.
     unsafe fn unlock() {
         let flash = Self::pac();
         while flash.sr().read().bsy() {}
@@ -64,7 +85,6 @@ impl Stm32g4Flash {
     unsafe fn check_and_clear_errors() -> Result<(), FlashError> {
         let sr = Self::pac().sr().read();
         if sr.progerr() || sr.wrperr() || sr.pgaerr() || sr.sizerr() || sr.pgserr() {
-            // Clear error flags (write-1-to-clear).
             Self::pac().sr().modify(|w| {
                 w.set_progerr(true);
                 w.set_wrperr(true);
@@ -79,10 +99,19 @@ impl Stm32g4Flash {
     }
 }
 
+#[cfg(feature = "flash-driver")]
+impl Default for Stm32g4Flash {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "flash-driver")]
 impl ErrorType for Stm32g4Flash {
     type Error = FlashError;
 }
 
+#[cfg(feature = "flash-driver")]
 impl NorFlash for Stm32g4Flash {
     const WRITE_SIZE: usize = 8;   // 64-bit half-words
     const ERASE_SIZE: usize = 2048; // 2 KB pages
@@ -96,8 +125,6 @@ impl NorFlash for Stm32g4Flash {
             Self::unlock();
 
             let flash = Self::pac();
-
-            // Enable page erase mode.
             flash.cr().modify(|w| w.set_per(true));
 
             for page in (from / Self::ERASE_SIZE as u32)..(to / Self::ERASE_SIZE as u32) {
@@ -127,8 +154,6 @@ impl NorFlash for Stm32g4Flash {
             Self::unlock();
 
             let flash = Self::pac();
-
-            // Enable programming (64-bit).
             flash.cr().modify(|w| w.set_pg(true));
 
             for chunk in bytes.chunks_exact(Self::WRITE_SIZE) {
@@ -148,6 +173,7 @@ impl NorFlash for Stm32g4Flash {
     }
 }
 
+#[cfg(feature = "flash-driver")]
 impl ReadNorFlash for Stm32g4Flash {
     const READ_SIZE: usize = 4;
 

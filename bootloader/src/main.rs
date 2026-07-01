@@ -2,7 +2,6 @@
 #![no_main]
 
 mod crc;
-mod flash;
 mod uart;
 mod ymodem;
 
@@ -15,7 +14,7 @@ use foc_common::{
 // Re-export the PAC so the linker retains the device crate's vector table.
 use embassy_stm32::pac as _;
 
-use crate::flash::Stm32g4Flash;
+use foc_common::Stm32g4Flash;
 
 /// Application entry point (called by bootloader when OTA flag is None or after
 /// successful OTA). Sets VTOR, sets MSP, jumps to app reset vector.

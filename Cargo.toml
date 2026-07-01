@@ -10,7 +10,7 @@ authors = ["heng"]
 description = "Field Oriented Control firmware in Rust on B-G431B-ESC1"
 
 [dependencies]
-foc-common = { path = "common", features = ["defmt"] }
+foc-common = { path = "common", features = ["defmt", "flash-driver", "defmt-format"] }
 foc-algo = { path = "foc-algo" }
 embassy-stm32 = { version = "0.6", features = ["stm32g431cb", "defmt", "time-driver-any", "unstable-pac", "memory-x"] }
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
