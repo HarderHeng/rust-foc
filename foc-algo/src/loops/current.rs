@@ -13,10 +13,17 @@ use crate::math::transforms::{clark_balanced, inv_park, park, Trig};
 pub struct Runtime {
     pub id: f32,
     pub iq: f32,
+    /// Applied d-axis voltage (V) — PI output + feedforward.  This is what
+    /// enters SVPWM, and what the sensorless observer should consume.
     pub vd: f32,
+    /// Applied q-axis voltage (V) — PI output + feedforward.
     pub vq: f32,
     pub pi_d_output: f32,
     pub pi_q_output: f32,
+    /// Feedforward d-axis voltage (V), 0 when decoupling disabled.
+    pub vd_ff: f32,
+    /// Feedforward q-axis voltage (V), 0 when decoupling disabled.
+    pub vq_ff: f32,
     pub duty: Duty,
 }
 
@@ -51,12 +58,17 @@ impl CurrentLoop {
 
     /// One current-loop step.  Returns the new duty cycles and writes
     /// diagnostics into `self.runtime`.
+    ///
+    /// `vd_ff` / `vq_ff` are feedforward decoupling voltages (V), added to
+    /// the PI outputs before SVPWM.  Pass `0.0` for both to disable
+    /// decoupling.  See [`crate::math::decoupling_voltage`].
     #[allow(clippy::similar_names)]
     #[inline]
     pub fn update<T: Trig>(
         &mut self,
         ia: f32, ib: f32, angle: f32,
         id_ref: f32, iq_ref: f32,
+        vd_ff: f32, vq_ff: f32,
         dt: f32,
     ) -> Duty {
         let ab = clark_balanced(ia, ib);
@@ -64,10 +76,14 @@ impl CurrentLoop {
         self.runtime.id = dq.d;
         self.runtime.iq = dq.q;
 
-        let vd = self.d_pid.update(id_ref, dq.d, dt);
-        let vq = self.q_pid.update(iq_ref, dq.q, dt);
-        self.runtime.pi_d_output = vd;
-        self.runtime.pi_q_output = vq;
+        let vd_pi = self.d_pid.update(id_ref, dq.d, dt);
+        let vq_pi = self.q_pid.update(iq_ref, dq.q, dt);
+        self.runtime.pi_d_output = vd_pi;
+        self.runtime.pi_q_output = vq_pi;
+        self.runtime.vd_ff = vd_ff;
+        self.runtime.vq_ff = vq_ff;
+        let vd = vd_pi + vd_ff;
+        let vq = vq_pi + vq_ff;
         self.runtime.vd = vd;
         self.runtime.vq = vq;
 
@@ -91,7 +107,7 @@ mod tests {
     fn zero_state_centred_duty() {
         let mut cl = CurrentLoop::new();
         cl.set_vdc(24.0);
-        let d = cl.update::<LibmTrig>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0001);
+        let d = cl.update::<LibmTrig>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0001);
         approx(d.ta, 0.5);
     }
 
@@ -99,8 +115,23 @@ mod tests {
     fn vdc_zero_safe_output() {
         let mut cl = CurrentLoop::new();
         cl.set_vdc(0.0);
-        let d = cl.update::<LibmTrig>(1.0, -0.5, 0.0, 0.0, 0.0, 0.0001);
+        let d = cl.update::<LibmTrig>(1.0, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0001);
         approx(d.ta, 0.0);
+    }
+
+    #[test]
+    fn feedforward_adds_to_pi_output() {
+        let mut cl = CurrentLoop::new();
+        cl.set_vdc(24.0);
+        // No PI excitation (refs = measured = 0), so PI output ≈ 0.
+        // FF should land directly on applied voltage.
+        cl.update::<LibmTrig>(0.0, 0.0, 0.0, 0.0, 0.0, 1.5, -2.5, 0.0001);
+        approx(cl.runtime.pi_d_output, 0.0);
+        approx(cl.runtime.pi_q_output, 0.0);
+        approx(cl.runtime.vd_ff,  1.5);
+        approx(cl.runtime.vq_ff, -2.5);
+        approx(cl.runtime.vd,  1.5);
+        approx(cl.runtime.vq, -2.5);
     }
 
     fn approx(a: f32, b: f32) {

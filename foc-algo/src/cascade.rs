@@ -22,7 +22,8 @@
 use crate::loops::current::CurrentLoop;
 use crate::loops::position::{PositionFfFn, PositionLoopController};
 use crate::loops::speed::{SpeedFfFn, SpeedLoopController};
-use crate::math::{circle_limitation, Duty, Pid, Ramp, Trig};
+use crate::math::{circle_limitation, decoupling_voltage, Duty, Pid, Ramp, Trig};
+use crate::motor::MotorParams;
 use crate::state::{ControllerState, Meas, Target};
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -51,6 +52,15 @@ pub struct FocController {
     /// the controller applies circle limitation to (id, iq) before the
     /// current loop, ensuring `id² + iq² ≤ current_limit²`.
     current_limit: f32,
+
+    /// Motor parameters.  Required only when `decoupling` is enabled.
+    motor: Option<MotorParams>,
+    /// When `true`, the controller adds dq-axis feedforward voltage
+    /// (`−ω·Lq·Iq` and `ω·(Ld·Id + λ)`) to the current PI outputs, suppressing
+    /// cross-coupling at speed.  Requires `motor` to be set via
+    /// [`set_motor`](Self::set_motor).  Default: `false` — safe for small
+    /// PMSMs where the coupling is negligible.
+    decoupling: bool,
 
     /// When `true`, switching to `Mode::Off` clears all PI integrators and
     /// ramp state — the controller starts "fresh" on the next non-Off
@@ -94,6 +104,8 @@ impl FocController {
             iq_ramp: Ramp::new(1000.0),
             current_limit: 0.0,
             reset_on_off: false,
+            motor: None,
+            decoupling: false,
             position: PositionLoopController::default(),
             speed: SpeedLoopController::default(),
             current: CurrentLoop::new(),
@@ -135,11 +147,25 @@ impl FocController {
         self.runtime.iq_command = iq_cmd;
         self.runtime.current_limited = limited;
 
-        // 5. Current loop → PWM duty
+        // 5. Feedforward decoupling (optional).  Zero output when
+        //    decoupling is off or no motor parameters are set.
+        let (vd_ff, vq_ff) = if self.decoupling {
+            if let Some(m) = self.motor {
+                let omega_e = self.meas.speed * f32::from(m.pole_pairs);
+                decoupling_voltage(omega_e, m.ld, m.lq, m.flux_linkage, id_cmd, iq_cmd)
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        };
+
+        // 6. Current loop → PWM duty
         self.current.set_vdc(self.meas.vdc);
         self.duty = self.current.update::<T>(
             self.meas.ia, self.meas.ib, self.meas.theta,
             id_cmd, iq_cmd,
+            vd_ff, vq_ff,
             dt,
         );
     }
@@ -255,6 +281,30 @@ impl FocController {
     /// Set the position-loop feedforward callback.  `None` disables feedforward.
     pub fn set_position_ff(&mut self, cb: Option<PositionFfFn>) {
         self.position.ff_callback = cb;
+    }
+
+    /// Inject motor physical constants.  Required by
+    /// [`enable_decoupling`](Self::enable_decoupling); ignored otherwise.
+    pub fn set_motor(&mut self, motor: MotorParams) {
+        self.motor = Some(motor);
+    }
+
+    /// Enable (`true`) or disable (`false`) dq-axis feedforward voltage
+    /// decoupling in the current loop.  Requires a motor set via
+    /// [`set_motor`](Self::set_motor); if missing, FF stays at 0.
+    ///
+    /// **Recommendation**: leave off for small PMSMs at low/medium speed
+    /// (coupling is negligible).  Enable for high-speed operation where
+    /// cross-coupling limits the current-loop bandwidth.
+    pub fn enable_decoupling(&mut self, on: bool) {
+        self.decoupling = on;
+    }
+
+    /// True when feedforward decoupling is enabled.  Independent of
+    /// whether a motor is actually set.
+    #[must_use]
+    pub fn decoupling_enabled(&self) -> bool {
+        self.decoupling
     }
 
     // ── Configuration accessors (read-only) ──
@@ -547,6 +597,57 @@ mod tests {
         let _: f32 = rt.id;
         let _: f32 = rt.iq;
         let _: crate::math::svpwm::Duty = rt.duty;
+    }
+
+    // ── Feedforward decoupling ──
+
+    fn motor_for_decoupling() -> MotorParams {
+        MotorParams {
+            r: 0.3, ld: 0.0005, lq: 0.0008,
+            flux_linkage: 0.01, pole_pairs: 7,
+            continuous_current: 5.0, inertia: 1e-5,
+        }
+    }
+
+    #[test]
+    fn decoupling_off_by_default() {
+        assert!(!make(Mode::Torque).decoupling_enabled());
+    }
+
+    #[test]
+    fn decoupling_requires_motor_to_actually_apply() {
+        // Enable decoupling but never set motor → vd_ff/vq_ff must stay 0,
+        // so applied voltages equal PI outputs.
+        let mut c = make(Mode::Torque);
+        c.enable_decoupling(true);
+        c.meas.speed = 1000.0;  // high enough to force non-zero FF if applied
+        c.target.iq = 0.0;      // no PI excitation → PI ≈ 0, no FF
+        c.update::<LibmTrig>(0.001);
+        let rt = c.current_runtime();
+        approx(rt.vd_ff, 0.0);
+        approx(rt.vq_ff, 0.0);
+    }
+
+    #[test]
+    fn decoupling_applies_feedforward_at_speed() {
+        // Lq = 0.0008, iq_cmd = 5, ω_e = speed · pp = 1000 · 7 = 7000.
+        // Vd_ff = -ω·Lq·Iq = -7000 · 0.0008 · 5 = -28 V
+        // Vq_ff =  ω·(Ld·Id + λ) = 7000 · (0.0005·0 + 0.01) = 70 V
+        let mut c = make(Mode::Torque);
+        c.iq_ramp.rate_limit = 0.0;
+        c.set_motor(motor_for_decoupling());
+        c.enable_decoupling(true);
+        c.meas.speed = 1000.0;
+        c.target.iq = 5.0;
+        c.update::<LibmTrig>(0.001);
+        let rt = c.current_runtime();
+        let omega_e = 1000.0 * 7.0;
+        // FF used the *commanded* currents (post circle-limit), not measured.
+        approx(rt.vd_ff, -omega_e * 0.0008 * 5.0);
+        approx(rt.vq_ff,  omega_e * 0.01); // Id_cmd = 0, so Ld·Id term vanishes
+        // Total applied voltage = PI + FF.
+        approx(rt.vd, rt.pi_d_output + rt.vd_ff);
+        approx(rt.vq, rt.pi_q_output + rt.vq_ff);
     }
 
     // ── End-to-end smoke test ─────────────────────────────────────────

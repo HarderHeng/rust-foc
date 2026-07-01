@@ -5,6 +5,7 @@
 //! any `cargo test` host.
 
 pub mod circle_limitation;
+pub mod decoupling;
 pub mod filter;
 pub mod pid;
 pub mod ramp;
@@ -12,6 +13,7 @@ pub mod svpwm;
 pub mod transforms;
 
 pub use circle_limitation::circle_limitation;
+pub use decoupling::decoupling_voltage;
 pub use filter::LowPassFilter;
 pub use pid::{Pid, combine_pi_ff};
 pub use ramp::Ramp;

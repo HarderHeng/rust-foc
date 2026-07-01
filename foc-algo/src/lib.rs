@@ -17,7 +17,8 @@
 //!    methods to derive everything else.
 //! 3. **Helpers** — [`field_weakening`] for high-speed `id` reference,
 //!    [`SmoObserver`] for sensorless angle, [`I2tLimiter`] for thermal
-//!    foldback.
+//!    foldback, [`decoupling_voltage`] for high-speed cross-coupling
+//!    compensation.
 //!
 //! The inner loops ([`SpeedLoopController`], [`PositionLoopController`],
 //! [`CurrentLoop`]) are exposed for users who want to assemble their own
@@ -106,8 +107,8 @@ pub mod state;
 // Math primitives
 pub use math::{
     Abc, AlphaBeta, Dq, Duty, LowPassFilter, Pid, Ramp, Svpwm, Trig,
-    circle_limitation, clark, clark_balanced, combine_pi_ff, ic_from_iab,
-    inv_clark, inv_park, park,
+    circle_limitation, clark, clark_balanced, combine_pi_ff, decoupling_voltage,
+    ic_from_iab, inv_clark, inv_park, park,
 };
 #[cfg(feature = "libm-trig")]
 pub use math::LibmTrig;
