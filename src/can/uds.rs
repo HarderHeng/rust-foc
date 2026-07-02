@@ -92,6 +92,14 @@ static LAST_RESPONSE_LEN: core::sync::atomic::AtomicU8 =
 ///
 /// The response is also stashed in `LAST_RESPONSE` for the
 /// SDO read on `0x2F00.0` to fetch.
+///
+/// **Lives in `.data` (RAM).** Called from `od::write` on every
+/// SDO write to 0x2F00.0, including every TransferData segment
+/// during OTA. Keeping this in RAM means the entire UDS dispatch
+/// chain (and the OTA handlers it reaches) stays off the OTA
+/// write path.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn dispatch(request: &[u8]) -> usize {
     if request.is_empty() {
         return store_negative(0, NRC::IncorrectMessageLength);
@@ -135,6 +143,11 @@ pub fn dispatch(request: &[u8]) -> usize {
 
 /// Read back the last response, in `OdValue` form. The
 /// canopen OD layer calls this for SDO reads of `0x2F00.0`.
+///
+/// **Lives in `.data` (RAM).** Called from `od::read` for 0x2F00.0
+/// — every SDO read of the UDS gateway goes through here.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn load_response() -> super::od::OdValue {
     let len = LAST_RESPONSE_LEN.load(Ordering::Relaxed) as usize;
     let mut bytes = [0u8; 7];
@@ -150,6 +163,12 @@ pub fn load_response() -> super::od::OdValue {
 /// True iff the canopen task should perform an NVIC system
 /// reset on the next tick. Cleared once observed (so the task
 /// can keep polling without re-entering the reset path).
+///
+/// **Lives in `.data` (RAM).** Called from `canopen_task` on
+/// every SDO response; on the OTA path, this fires after
+/// `handle_transfer_exit` arms the reset flag.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn take_reset_request() -> bool {
     RESET_REQUESTED.swap(false, Ordering::Relaxed)
 }
@@ -434,6 +453,13 @@ fn handle_tester_present(payload: &[u8]) -> usize {
 /// supports up to 7 bytes (the SecurityAccess seed response is
 /// 6 bytes). Anything beyond 7 is a programming bug — return
 /// `ResponseTooLong` so the caller sees the constraint.
+///
+/// **Lives in `.data` (RAM).** Called from the inlined UDS
+/// handlers (which live inside the RAM-resident `dispatch`),
+/// so without this the call would trampoline into flash and
+/// the OTA write pointer could overwrite the destination body.
+#[inline(never)]
+#[link_section = ".data"]
 fn store_positive(payload: &[u8]) -> usize {
     let len = payload.len();
     if len > 7 {
@@ -452,6 +478,10 @@ fn store_positive(payload: &[u8]) -> usize {
 }
 
 /// Store a negative response (`[0x7F, SID, NRC]`) and return 3.
+///
+/// **Lives in `.data` (RAM).** Same rationale as `store_positive`.
+#[inline(never)]
+#[link_section = ".data"]
 fn store_negative(sid: u8, nrc: NRC) -> usize {
     store_external_response(&[0x7F, sid, nrc as u8])
 }
@@ -461,6 +491,13 @@ fn store_negative(sid: u8, nrc: NRC) -> usize {
 /// helpers. Used by `super::ota` to push a response that
 /// originates from a different code path (still inside the
 /// single-threaded canopen task, so no race).
+///
+/// **Lives in `.data` (RAM).** Called from `ota::store_uds_positive`
+/// / `store_uds_negative` (both RAM-resident) on every OTA
+/// response. Keeping this in RAM closes the last
+/// flash-resident call in the OTA response path.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn store_external_response(payload: &[u8]) -> usize {
     let len = payload.len();
     let mut buf = [0u8; 7];

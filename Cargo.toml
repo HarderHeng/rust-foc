@@ -47,7 +47,14 @@ embedded-cli = { version = "0.2.1" }
 [profile.release]
 debug = 2
 opt-level = "s"
-lto = true
+# LTO is disabled: the OTA path uses `#[link_section = ".data"]`
+# to put the dispatch chain in RAM, and LTO would inline those
+# functions into their `.text` callers regardless of the section
+# annotation, breaking the safety property. Without LTO the
+# binary is ~6x larger (12 KB → 80 KB .text) but still fits in
+# the 124 KB app region with headroom. The split between .text
+# and .data matches what we asked the linker for.
+lto = false
 codegen-units = 1
 strip = true
 

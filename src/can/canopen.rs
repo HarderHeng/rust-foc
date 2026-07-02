@@ -149,7 +149,18 @@ pub fn build_heartbeat_frame(state: NmtState) -> Frame {
 /// block the tick arm on `core::future::pending()` so the loop
 /// only services RX. Constructing `Ticker::every(Duration::from_millis(0))`
 /// would fire on every poll iteration and flood the bus.
+///
+/// **Lives in `.data` (RAM).** This is the SDO receive dispatch
+/// loop — every SDO frame the master sends (including every
+/// TransferData byte during OTA) goes through here. Putting
+/// the task in RAM removes the only remaining flash-resident
+/// trampoline on the OTA write path: `canopen_task → sdo::dispatch`.
+/// Without this, the OTA write pointer would eventually cross
+/// that trampoline (somewhere in canopen_task's body) and the
+/// master would lose the ability to deliver TransferData frames
+/// mid-transfer.
 #[embassy_executor::task]
+#[link_section = ".data"]
 pub async fn canopen_task(can: &'static mut Can<'static>) {
     info!("CANopen: node {} starting", NODE_ID);
 

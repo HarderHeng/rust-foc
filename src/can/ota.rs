@@ -119,6 +119,13 @@ pub fn take_reset_request() -> bool {
 
 /// Handle 0x34 RequestDownload. Returns the response length
 /// (1..=4) on success or 3 for negative responses.
+///
+/// **Lives in `.data` (RAM)** — see module-level docs. Calling
+/// `flash::erase_app_region` while the erase sequence is running
+/// out of flash that the controller is about to clobber is the
+/// hazard this whole arrangement exists to prevent.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn handle_request_download(payload: &[u8]) -> usize {
     // Request: [0x00, size_lo, size_hi, size_hi2, size_hi3]
     // (dataFormatIdentifier=0x00 = no compression; 4-byte size
@@ -170,6 +177,14 @@ pub fn handle_request_download(payload: &[u8]) -> usize {
 /// Handle 0x36 TransferData. `payload` is the bytes after the
 /// SID: `[block_seq, b0, b1]` (3 bytes for our 2-byte
 /// granularity).
+///
+/// **Lives in `.data` (RAM)** — this is the hot path during OTA
+/// and must not be running from flash while we're writing flash.
+/// On STM32G4 the flash prefetch buffer keeps recent instructions
+/// alive, but the moment a write reaches the cache line containing
+/// our PC the controller would execute garbage.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn handle_transfer_data(payload: &[u8]) -> usize {
     if OtaState::from_u8(OTA_STATE.load(Ordering::Relaxed)) != OtaState::Receiving {
         return store_uds_negative(SID_TRANSFER_DATA, NRC::ConditionsNotCorrect);
@@ -249,6 +264,12 @@ pub fn handle_transfer_data(payload: &[u8]) -> usize {
 /// Handle 0x37 RequestTransferExit. Flushes any buffered bytes
 /// (padded to 8 with 0xFF), writes the post-OTA metadata, sets
 /// the reset flag, returns positive.
+///
+/// **Lives in `.data` (RAM)** — calls `flash::write_metadata` and
+/// `flash::write_u64` (the trailing flush) on the OTA path, so
+/// must be running from RAM by the time we get here.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn handle_transfer_exit(payload: &[u8]) -> usize {
     if OtaState::from_u8(OTA_STATE.load(Ordering::Relaxed)) != OtaState::Receiving {
         return store_uds_negative(
@@ -342,17 +363,31 @@ enum NRC {
 /// Forward a UDS positive response into the `LAST_RESPONSE`
 /// buffer used by the UDS module. The `+ 0x40` is the standard
 /// UDS positive-response offset.
+///
+/// Lives in `.data` (RAM) — called from the OTA handlers which
+/// are themselves RAM-resident, so the call chain stays uniform.
+#[inline(never)]
+#[link_section = ".data"]
 fn store_uds_positive(payload: &[u8]) -> usize {
     super::uds::store_external_response(payload)
 }
 
 /// Same but for negative responses (`[0x7F, SID, NRC]`).
+#[inline(never)]
+#[link_section = ".data"]
 fn store_uds_negative(sid: u8, nrc: NRC) -> usize {
     super::uds::store_external_response(&[0x7F, sid, nrc as u8])
 }
 
 /// Standard CRC-32/ISO-HDLC (poly 0x04C1_1DB7), one byte at
 /// a time. Table-less so we don't need 1 KB of const data.
+///
+/// Lives in `.data` (RAM) — called from `handle_transfer_data` per
+/// byte of incoming image data. The function is small but on the
+/// OTA hot path; RAM-residency keeps the closure uniform with the
+/// rest of the OTA code.
+#[inline(never)]
+#[link_section = ".data"]
 fn crc32_update(crc: u32, byte: u8) -> u32 {
     let mut c = crc ^ byte as u32;
     for _ in 0..8 {

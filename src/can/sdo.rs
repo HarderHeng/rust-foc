@@ -176,6 +176,11 @@ static SDO_UPLOAD_TOGGLE: AtomicU8 = AtomicU8::new(0);
 /// replacing any in-progress upload. Called from
 /// `build_upload_response` when the response is too big for
 /// expedited transfer.
+///
+/// **Lives in `.data` (RAM).** Called from `build_upload_response`,
+/// which is itself RAM-resident.
+#[inline(never)]
+#[link_section = ".data"]
 fn segmented_upload_begin(bytes: &[u8]) {
     debug_assert!(bytes.len() <= SEGMENTED_MAX);
     let len = bytes.len() as u8;
@@ -193,6 +198,11 @@ fn segmented_upload_begin(bytes: &[u8]) {
 /// is the final one for the upload. Returns `None` if no upload
 /// is in progress (SDO_UPLOAD_LEN == 0) — the caller should
 /// translate that into an abort.
+///
+/// **Lives in `.data` (RAM).** Called from
+/// `build_upload_segment_response`, RAM-resident.
+#[inline(never)]
+#[link_section = ".data"]
 fn segmented_upload_next() -> Option<([u8; 7], usize, bool)> {
     let len = SDO_UPLOAD_LEN.load(Ordering::Relaxed) as usize;
     if len == 0 {
@@ -251,6 +261,11 @@ enum SegDownloadResult {
 
 /// Start a segmented download of `size` bytes for the given OD
 /// entry. Clears any in-flight transfer state.
+///
+/// **Lives in `.data` (RAM).** Called from `dispatch` which is
+/// itself RAM-resident.
+#[inline(never)]
+#[link_section = ".data"]
 fn segmented_download_begin(index: u16, sub: u8, size: u8) {
     debug_assert!(size >= 5 && size as usize <= SEGMENTED_MAX);
     SDO_DOWNLOAD_LEN.store(size, Ordering::Relaxed);
@@ -269,6 +284,14 @@ fn segmented_download_begin(index: u16, sub: u8, size: u8) {
 /// conditions (no Initiate in progress, toggle mismatch, size
 /// overflow, premature last-segment flag) map to an `InvalidCommand`
 /// abort and clear the download state.
+///
+/// **Lives in `.data` (RAM).** Called from `dispatch` which is
+/// itself RAM-resident; on `Complete`, the assembled value is
+/// dispatched into `od_write` → `uds::dispatch` → `ota::handle_*`,
+/// all of which need to be running from RAM by the time we get
+/// here.
+#[inline(never)]
+#[link_section = ".data"]
 fn segmented_download_segment(
     toggle: u8,
     num_data_bytes: u8,
@@ -339,6 +362,12 @@ fn segmented_download_segment(
 ///
 /// `data` is the 8-byte payload of the frame (passed in as a
 /// slice so callers can decide how to copy; we never modify it).
+///
+/// **Lives in `.data` (RAM).** Called from `dispatch` which is
+/// itself RAM-resident; keeping the parse logic in RAM means
+/// the entire SDO receive path stays off the OTA write path.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn parse_request(data: &[u8]) -> Option<Result<SdoRequest, SdoAbort>> {
     if data.len() < 8 {
         // A malformed frame on the SDO COB-ID is suspect; just
@@ -437,6 +466,14 @@ pub fn parse_request(data: &[u8]) -> Option<Result<SdoRequest, SdoAbort>> {
 // ---- Response builders ----------------------------------------------
 
 /// Build a 0x60 success response for an Initiate Download Request.
+///
+/// **Lives in `.data` (RAM).** Called from `dispatch` which is
+/// itself RAM-resident; the response frame is then sent via
+/// `can.write()` (the only flash call remaining on the path,
+/// but `can.write` is far from the OTA write pointer crossing
+/// range because it sits in the embassy driver — see module docs).
+#[inline(never)]
+#[link_section = ".data"]
 pub fn build_download_ok_response() -> Frame {
     // unwrap: 8-byte frame with arbitrary payload.
     Frame::new_standard(SDO_TX_COB_ID, &[0x60, 0, 0, 0, 0, 0, 0, 0])
@@ -449,6 +486,11 @@ pub fn build_download_ok_response() -> Frame {
 ///   len ≤ 4: expedited (0x8F/0x8E/0x8D/0x8C for 1/2/3/4 bytes)
 ///   len ≥ 5: segmented — emit 0x82 with size, stash bytes for
 ///            the subsequent Upload Segment requests.
+///
+/// **Lives in `.data` (RAM).** Called from `dispatch` which is
+/// itself RAM-resident.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn build_upload_response(index: u16, sub: u8, value: OdValue) -> Frame {
     let index_bytes = index.to_le_bytes();
     let mut payload = [0u8; 8];
@@ -502,6 +544,11 @@ pub fn build_upload_response(index: u16, sub: u8, value: OdValue) -> Frame {
 /// of the in-flight segmented upload. `toggle` is the toggle
 /// bit from the client's Upload Segment Request (echoed back per
 /// spec).
+///
+/// **Lives in `.data` (RAM).** Called from `dispatch` which is
+/// itself RAM-resident.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn build_upload_segment_response(toggle: u8) -> Frame {
     let mut payload = [0u8; 8];
     match segmented_upload_next() {
@@ -527,6 +574,11 @@ pub fn build_upload_segment_response(toggle: u8) -> Frame {
 }
 
 /// Build an abort frame for the given (index, sub).
+///
+/// **Lives in `.data` (RAM).** Called from `dispatch` which is
+/// itself RAM-resident.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn build_abort_response(index: u16, sub: u8, code: SdoAbort) -> Frame {
     let index_bytes = index.to_le_bytes();
     let code_bytes = code.code().to_le_bytes();
@@ -546,6 +598,19 @@ pub fn build_abort_response(index: u16, sub: u8, code: SdoAbort) -> Frame {
 /// On parse failure or OD error, returns an abort frame with
 /// the appropriate SDO abort code. The caller just needs to
 /// `can.write(&response).await`.
+///
+/// **Lives in `.data` (RAM).** This is the call site for
+/// `ota::handle_request_download` / `handle_transfer_data` /
+/// `handle_transfer_exit` from `sdo::dispatch` — putting the
+/// dispatcher in RAM moves the long-branch trampolines
+/// (which the linker inserts to reach RAM-resident OTA
+/// handlers from flash) out of the OTA write path. Without
+/// this, the trampolines at ~0x080147xx would be overwritten
+/// mid-transfer (the app region extends to 0x0801_F800), and
+/// any subsequent SDO dispatch into the OTA handlers would
+/// jump to garbage.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn dispatch(data: &[u8]) -> Option<Frame> {
     let parsed = match parse_request(data) {
         Some(Ok(req)) => req,
@@ -663,6 +728,12 @@ pub fn dispatch(data: &[u8]) -> Option<Frame> {
 /// Check whether a received frame is addressed to our SDO
 /// server (the master → slave COB-ID). Used by the canopen
 /// task to route frames to `dispatch`.
+///
+/// **Lives in `.data` (RAM).** Called from `canopen_task` once
+/// per received frame; keeping it RAM-resident means the COB-ID
+/// check itself is never on a flash-resident trampoline.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn is_sdo_request(frame: &Frame) -> bool {
     let id = match frame.header().id() {
         Id::Standard(s) => s.as_raw(),

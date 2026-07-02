@@ -70,6 +70,15 @@ pub enum FlashError {
 /// Convert an absolute flash address to a page number suitable
 /// for `FLASH_CR.PNB`. STM32G4 page numbers are offsets from
 /// `FLASH_BASE`, not (address / page_size).
+///
+/// Lives in `.data` (RAM) because it's on the OTA write hot path:
+/// `write_u64` calls it before any flash write, so jumping back
+/// into flash is fine at that point. But putting it in RAM keeps
+/// the call graph uniform — every function called from the OTA
+/// path is in RAM, so we never have to reason about whether a
+/// given helper's address is "still ahead of the write pointer".
+#[inline(never)]
+#[link_section = ".data"]
 fn page_of(offset: u32) -> u32 {
     (offset - FLASH_BASE) / ERASE_SIZE
 }
@@ -78,6 +87,13 @@ fn page_of(offset: u32) -> u32 {
 /// an OTA download. The metadata block (last 2 KB) is NOT
 /// erased — that's where we record the post-OTA image size
 /// + CRC32.
+///
+/// Lives in `.data` (RAM) — the erase loop runs from flash,
+/// and the call into a flash-resident helper after the erase
+/// pointer has crossed that helper's address would crash. See
+/// the module-level docs in `src/can/ota.rs` for the rationale.
+#[inline(never)]
+#[link_section = ".data"]
 pub unsafe fn erase_app_region() -> Result<(), FlashError> {
     unlock_sequence();
     let flash = pac::FLASH;
@@ -105,6 +121,12 @@ pub unsafe fn erase_app_region() -> Result<(), FlashError> {
 ///
 /// The value is written little-endian (low 4 bytes first, then
 /// high 4 bytes), matching STM32 flash memory layout.
+///
+/// Lives in `.data` (RAM) — this is the hot path during OTA and
+/// must not be running from flash while we're writing flash.
+/// See the module-level docs in `src/can/ota.rs` for the rationale.
+#[inline(never)]
+#[link_section = ".data"]
 pub unsafe fn write_u64(offset: u32, value: u64) -> Result<(), FlashError> {
     if offset % WRITE_SIZE != 0 {
         return Err(FlashError::Unaligned);
@@ -153,6 +175,10 @@ pub fn read_u32(offset: u32) -> u32 {
 /// until `write_metadata` overwrites it (the chip may reboot
 /// between writes if power is lost, and the bootloader would
 /// fall back to the previous image).
+///
+/// Lives in `.data` (RAM) — same reason as `write_u64`.
+#[inline(never)]
+#[link_section = ".data"]
 pub unsafe fn write_metadata(
     magic: u32,
     image_size: u32,
@@ -191,6 +217,13 @@ pub unsafe fn write_metadata(
     r
 }
 
+/// Unlock the flash controller. Key sequence is two writes
+/// (KEY1 then KEY2) to FLASH_KEYR, per RM0440 §3.3.5.
+///
+/// Lives in `.data` (RAM) — see `write_u64`'s docs for the
+/// rationale (same as the rest of the OTA path).
+#[inline(never)]
+#[link_section = ".data"]
 unsafe fn unlock_sequence() {
     let flash = pac::FLASH;
     while flash.sr().read().bsy() {}
@@ -198,14 +231,24 @@ unsafe fn unlock_sequence() {
     flash.keyr().write_value(0xCDEF_89AB);
 }
 
+/// Lock the flash controller. Always called from RAM-resident
+/// OTA code, so lives in `.data`.
+#[inline(never)]
+#[link_section = ".data"]
 unsafe fn lock() {
     pac::FLASH.cr().modify(|w| w.set_lock(true));
 }
 
+/// Wait until the flash controller reports !bsy. Always called
+/// from RAM-resident OTA code, so lives in `.data`.
+#[inline(never)]
+#[link_section = ".data"]
 unsafe fn wait_busy() {
     while pac::FLASH.sr().read().bsy() {}
 }
 
+#[inline(never)]
+#[link_section = ".data"]
 unsafe fn check_and_clear_errors() -> Result<(), FlashError> {
     let sr = pac::FLASH.sr().read();
     if sr.progerr() || sr.wrperr() || sr.pgaerr() || sr.sizerr() || sr.pgserr() {

@@ -90,6 +90,14 @@ pub fn set_heartbeat_period_ms(ms: u16) {
 
 /// Read an OD entry. Returns the value, or an SDO abort code if
 /// the entry doesn't exist.
+///
+/// **Lives in `.data` (RAM).** Called from `sdo::dispatch` (which
+/// is RAM-resident) on every SDO read; for 0x2F00.0 the read
+/// dispatches into `uds::load_response` which is also RAM-resident.
+/// Keeping `read` in RAM means the call chain stays off the OTA
+/// write path.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn read(index: u16, sub: u8) -> Result<OdValue, SdoAbort> {
     match (index, sub) {
         // CiA 301 mandatory
@@ -115,6 +123,13 @@ pub fn read(index: u16, sub: u8) -> Result<OdValue, SdoAbort> {
 /// Write an OD entry. Returns `Ok(())` on success, or an SDO
 /// abort code if the entry doesn't exist, is read-only, or the
 /// value's size doesn't match the OD entry's size.
+///
+/// **Lives in `.data` (RAM).** For 0x2F00.0 (the UDS gateway),
+/// `write` calls into `uds::dispatch` which is RAM-resident.
+/// On the OTA path, every TransferData segment flows through
+/// here on its way to `uds::dispatch` → `ota::handle_transfer_data`.
+#[inline(never)]
+#[link_section = ".data"]
 pub fn write(index: u16, sub: u8, value: OdValue) -> Result<(), SdoAbort> {
     match (index, sub) {
         // RW: heartbeat producer time. Accept u16 (2 bytes); any
