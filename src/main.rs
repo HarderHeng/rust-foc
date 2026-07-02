@@ -3,6 +3,7 @@
 
 mod bsp;
 mod commands;
+mod control;
 mod drivers;
 mod metadata;
 mod tasks;

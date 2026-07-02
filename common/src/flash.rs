@@ -120,6 +120,9 @@ impl NorFlash for Stm32g4Flash {
         if from % Self::ERASE_SIZE as u32 != 0 || to % Self::ERASE_SIZE as u32 != 0 {
             return Err(FlashError::Unaligned);
         }
+        if from >= to || to > self.capacity() as u32 {
+            return Err(FlashError::OutOfBounds);
+        }
 
         unsafe {
             Self::unlock();
@@ -148,6 +151,12 @@ impl NorFlash for Stm32g4Flash {
     fn write(&mut self, mut offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
         if offset % Self::WRITE_SIZE as u32 != 0 || bytes.len() % Self::WRITE_SIZE != 0 {
             return Err(FlashError::Unaligned);
+        }
+        if bytes.is_empty() { return Ok(()); }
+        if offset >= self.capacity() as u32
+            || offset + bytes.len() as u32 > self.capacity() as u32
+        {
+            return Err(FlashError::OutOfBounds);
         }
 
         unsafe {

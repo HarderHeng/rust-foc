@@ -61,6 +61,15 @@ pub struct FocController {
     /// [`set_motor`](Self::set_motor).  Default: `false` — safe for small
     /// PMSMs where the coupling is negligible.
     decoupling: bool,
+    /// Electrical speed threshold (rad/s) below which the decoupling
+    /// feedforward is suppressed.  The decoupling term scales with `ω`,
+    /// so its magnitude is small at low speed, but observer noise in
+    /// `meas.speed` (especially at standstill) would inject a noisy FF
+    /// into the current loop.  Default `0.0` = always active whenever
+    /// `decoupling` is enabled (matches the previous behaviour).
+    /// ST's MCSDK gates around 5–10 % of rated speed; a typical value
+    /// is 50–100 rad/s for small PMSMs.
+    decoupling_speed_threshold: f32,
 
     /// Negative d-axis current floor for demagnetization protection (A).
     /// 0 (or any positive value) disables the check.
@@ -120,6 +129,7 @@ impl FocController {
             reset_on_off: false,
             motor: None,
             decoupling: false,
+            decoupling_speed_threshold: 0.0,
             i_demag: 0.0,
             position: PositionLoopController::default(),
             speed: SpeedLoopController::default(),
@@ -173,11 +183,19 @@ impl FocController {
         self.runtime.demag_limited = demag_limited;
 
         // 5. Feedforward decoupling (optional).  Zero output when
-        //    decoupling is off or no motor parameters are set.
+        //    decoupling is off, no motor parameters are set, or the
+        //    electrical speed is below `decoupling_speed_threshold`
+        //    (suppresses observer-noise injection at standstill).
         let (vd_ff, vq_ff) = if self.decoupling {
             if let Some(m) = self.motor {
                 let omega_e = self.meas.speed * f32::from(m.pole_pairs);
-                decoupling_voltage(omega_e, m.ld, m.lq, m.flux_linkage, id_cmd, iq_cmd)
+                if self.decoupling_speed_threshold > 0.0
+                    && omega_e.abs() < self.decoupling_speed_threshold
+                {
+                    (0.0, 0.0)
+                } else {
+                    decoupling_voltage(omega_e, m.ld, m.lq, m.flux_linkage, id_cmd, iq_cmd)
+                }
             } else {
                 (0.0, 0.0)
             }
@@ -343,6 +361,23 @@ impl FocController {
     #[must_use]
     pub fn decoupling_enabled(&self) -> bool {
         self.decoupling
+    }
+
+    /// Set the electrical speed threshold (rad/s) below which the
+    /// decoupling feedforward is suppressed.  Pass `0.0` to keep the
+    /// decoupling active at all speeds (default; matches the prior
+    /// behaviour).  Typical non-zero value: 50–100 rad/s for small
+    /// PMSMs.  Has no effect when [`enable_decoupling`](Self::enable_decoupling)
+    /// is `false`.
+    pub fn set_decoupling_speed_threshold(&mut self, rad_per_sec: f32) {
+        debug_assert!(rad_per_sec >= 0.0, "speed threshold must be ≥ 0");
+        self.decoupling_speed_threshold = rad_per_sec;
+    }
+
+    /// Current decoupling speed threshold (rad/s).  `0.0` means "no gate".
+    #[must_use]
+    pub fn decoupling_speed_threshold(&self) -> f32 {
+        self.decoupling_speed_threshold
     }
 
     /// Set the demagnetization protection floor for `id_cmd` (A).  Pass

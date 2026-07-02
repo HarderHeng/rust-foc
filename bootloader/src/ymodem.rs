@@ -91,7 +91,13 @@ fn parse_file_size(hdr: &[u8; HDR_PAYLOAD]) -> Option<usize> {
 }
 
 pub fn receive_image(flash: &mut Stm32g4Flash) -> Result<(), YmodemError> {
-    uart_write_byte(CRC_FLAG);
+    // y-modem CRC-mode start handshake: send 'C' three times spaced
+    // ~1 s apart. Standard senders (sb, sx, minicom-scripted, xmodem libs)
+    // expect this pattern and drop the session if they don't see it.
+    for _ in 0..3 {
+        uart_write_byte(CRC_FLAG);
+        cortex_m::asm::delay(170_000_000); // 1 s at 170 MHz
+    }
 
     let control = read_control_byte()?;
     match control {
@@ -114,14 +120,21 @@ pub fn receive_image(flash: &mut Stm32g4Flash) -> Result<(), YmodemError> {
     if file_size < CRC32_FOOTER_LEN { return Err(YmodemError::InvalidPacket); }
     let data_size = file_size - CRC32_FOOTER_LEN;
 
-    if data_size > (APP_END_ADDRESS - APP_START_ADDRESS) as usize {
+    // Reserve room at the end so the last STX packet (up to `DATA_PAYLOAD`
+    // bytes) cannot overflow into the metadata region when it's padded
+    // up to the 8-byte write granularity. The y-modem sender is expected
+    // to put its CRC32 in the last 4 bytes of the file; we keep some slack
+    // so that 0xFF pad bytes never collide with the CRC32 the read-back
+    // step expects.
+    const END_PADDING_BYTES: usize = 16;
+    if data_size > (APP_END_ADDRESS - APP_START_ADDRESS) as usize - END_PADDING_BYTES {
         return Err(YmodemError::ImageTooLarge);
     }
 
-    let mut hdr_crc_data = [0u8; 2 + HDR_PAYLOAD];
-    hdr_crc_data[..2].copy_from_slice(&num_buf);
-    hdr_crc_data[2..].copy_from_slice(&hdr_buf);
-    if validate_packet_crc(&hdr_crc_data[..], crc16[0], crc16[1]).is_err() {
+    // y-modem spec: CRC16 covers the header payload only — the
+    // packet-number byte (and its complement) are NOT part of the CRC.
+    // Including them makes the header CRC never match a standard sender.
+    if validate_packet_crc(&hdr_buf, crc16[0], crc16[1]).is_err() {
         uart_write_byte(NAK);
         return Err(YmodemError::InvalidPacket);
     }
@@ -147,10 +160,9 @@ pub fn receive_image(flash: &mut Stm32g4Flash) -> Result<(), YmodemError> {
                 let mut crc16_bytes = [0u8; CRC16_LEN];
                 read_bytes_timeout(&mut crc16_bytes)?;
 
-                let mut crc_buf = [0u8; 2 + DATA_PAYLOAD];
-                crc_buf[..2].copy_from_slice(&hdr2);
-                crc_buf[2..].copy_from_slice(&data_buf);
-                if validate_packet_crc(&crc_buf[..], crc16_bytes[0], crc16_bytes[1]).is_err() {
+                // y-modem spec: CRC16 covers only the 1024-byte data payload,
+                // not the packet-number pair.
+                if validate_packet_crc(&data_buf, crc16_bytes[0], crc16_bytes[1]).is_err() {
                     uart_write_byte(NAK);
                     continue;
                 }

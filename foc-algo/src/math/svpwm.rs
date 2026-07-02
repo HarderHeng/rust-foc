@@ -104,11 +104,15 @@ impl Svpwm {
 
     /// One modulation step.  Writes `self.duty`.
     ///
-    /// If `vdc ≤ 0` (config not yet set), output stays at the safe 0 % duty
-    /// across all phases — a hardware-safe fallback.
+    /// If `vdc ≤ 0` (config not yet set) or any input is non-finite,
+    /// output stays at the safe 0 % duty across all phases — a
+    /// hardware-safe fallback. NaN propagation through `1.0 / vdc` and
+    /// `clamp` would otherwise poison the timer compare values downstream.
     #[inline]
     pub fn update(&mut self, v_alpha: f32, v_beta: f32) {
-        if self.vdc <= 0.0 {
+        if self.vdc <= 0.0 || !self.vdc.is_finite()
+            || !v_alpha.is_finite() || !v_beta.is_finite()
+        {
             self.duty = Duty { ta: 0.0, tb: 0.0, tc: 0.0 };
             return;
         }

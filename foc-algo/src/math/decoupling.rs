@@ -61,6 +61,18 @@ pub fn decoupling_voltage(
     flux_linkage: f32,
     id: f32, iq: f32,
 ) -> (f32, f32) {
+    // NaN / INF guard. The observer can briefly emit non-finite `omega_e`
+    // during ramp-up or PLL divergence; feeding NaN into the current PI
+    // integrators NaN-poisons every downstream node (SVPWM, PWM duty),
+    // and the loop has no built-in recovery path. Returning (0, 0) keeps
+    // the PI running across the transient and lets the observer re-converge.
+    if !omega_e.is_finite()
+        || !ld.is_finite() || !lq.is_finite()
+        || !flux_linkage.is_finite()
+        || !id.is_finite() || !iq.is_finite()
+    {
+        return (0.0, 0.0);
+    }
     let vd_ff = -omega_e * lq * iq;
     let vq_ff = omega_e * (ld * id + flux_linkage);
     (vd_ff, vq_ff)
@@ -130,5 +142,24 @@ mod tests {
         let (vd_pos, _) = decoupling_voltage(100.0, 0.0005, 0.0008, 0.0, 0.0, 5.0);
         let (vd_neg, _) = decoupling_voltage(-100.0, 0.0005, 0.0008, 0.0, 0.0, 5.0);
         approx(vd_pos, -vd_neg);
+    }
+
+    /// NaN / INF in any input must produce (0, 0) so a transient observer
+    /// failure cannot NaN-poison the downstream current-loop integrators.
+    #[test]
+    fn non_finite_input_returns_zero() {
+        let cases: [(f32, f32, f32, f32, f32, f32); 6] = [
+            (f32::NAN, 0.0005, 0.0008, 0.05, 1.0, 5.0),     // omega_e NaN
+            (100.0, f32::NAN, 0.0008, 0.05, 1.0, 5.0),      // ld NaN
+            (100.0, 0.0005, 0.0008, f32::INFINITY, 1.0, 5.0), // flux INF
+            (100.0, 0.0005, 0.0008, 0.05, f32::NAN, 5.0),   // id NaN
+            (100.0, 0.0005, 0.0008, 0.05, 1.0, f32::NEG_INFINITY), // iq -INF
+            (f32::NAN, f32::NAN, f32::NAN, f32::NAN, f32::NAN, f32::NAN), // all NaN
+        ];
+        for (omega, ld, lq, flux, id, iq) in cases {
+            let (vd, vq) = decoupling_voltage(omega, ld, lq, flux, id, iq);
+            approx(vd, 0.0);
+            approx(vq, 0.0);
+        }
     }
 }
