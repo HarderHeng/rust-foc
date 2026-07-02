@@ -1,19 +1,22 @@
 //! Shell command implementations for embedded-cli.
 //!
-//! Defines a `#[derive(Command)]` enum `ShellCommand` with seven variants:
+//! Defines a `#[derive(Command)]` enum `ShellCommand` with six variants:
 //!   - `help`        — list available commands
 //!   - `version`     — firmware version string
 //!   - `info`        — chip + flash usage info
 //!   - `reboot`      — reset the MCU
-//!   - `ota_update`  — set OTA flag and reboot into bootloader
 //!   - `spin <f> <v>`— start open-loop rotating voltage vector
 //!   - `stop`        — soft-stop the open-loop spin
+//!
+//! (The previous `ota_update` command was removed when the y-modem
+//! bootloader was deleted; OTA is now driven over FDCAN1 by the
+//! CANopen + UDS protocol stack — see
+//! `docs/superpowers/specs/2026-07-02-can-ota-uds-design.md`.)
 
 use cortex_m::peripheral::SCB;
 use embedded_cli::cli::CliHandle;
 
 use crate::bsp::{BOARD_MCU, BOARD_NAME, FLASH_SIZE_KB, SRAM_SIZE_KB};
-use crate::commands::ota::run_ota_update;
 use crate::control::cmd::{OpenLoopCmd, OPEN_LOOP_CMD};
 use crate::control::open_loop::MAX_OPENLOOP_V;
 
@@ -45,10 +48,6 @@ pub enum ShellCommand {
     /// Reset the MCU
     #[command(name = "reboot")]
     Reboot,
-
-    /// Trigger OTA firmware update
-    #[command(name = "ota_update")]
-    OtaUpdate,
 
     /// Start the open-loop spin: `<freq_hz> <voltage>`
     /// (electrical frequency of the rotating vector, peak phase voltage).
@@ -128,9 +127,6 @@ where
                 // Brief delay so the message reaches the terminal before reset.
                 cortex_m::asm::delay(170_000_000 / 20); // ~50 ms at 170 MHz
                 SCB::sys_reset();
-            }
-            ShellCommand::OtaUpdate => {
-                run_ota_update(cli);
             }
             ShellCommand::Spin { freq_hz, voltage } => {
                 run_spin(cli, freq_hz, voltage);

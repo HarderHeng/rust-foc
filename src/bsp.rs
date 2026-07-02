@@ -6,6 +6,7 @@
 
 use embassy_stm32::{
     bind_interrupts,
+    can::Can,
     gpio::OutputType,
     peripherals::USART2,
     rcc::{
@@ -22,6 +23,7 @@ use embassy_stm32::{
     Config as HalConfig, Peripherals,
 };
 
+use crate::can::init_fdcan1;
 use crate::drivers::debug_uart::Uart2Sink;
 use crate::drivers::motor_pwm::MotorPwm;
 
@@ -66,6 +68,11 @@ pub struct BoardHandles {
     pub debug_uart: DebugUartSink,
     /// Three-phase inverter on TIM1, MOE=0 (idle) on return.
     pub motor_pwm: MotorPwm<'static>,
+    /// FDCAN1 on PB9 (TX) / PA11 (RX) for the OTA-side CANopen +
+    /// UDS protocol stack. Always in `NormalOperationMode` on
+    /// return; the canopen task does the boot-up message and
+    /// the 1 Hz heartbeat.
+    pub can: Can<'static>,
 }
 
 /// System clock: HSE 8 MHz → PLL ×85 /4 = 170 MHz.
@@ -175,5 +182,6 @@ pub fn board_init(p: Peripherals) -> BoardHandles {
     BoardHandles {
         debug_uart: Uart2Sink::new(buffered),
         motor_pwm: MotorPwm::new(pwm),
+        can: init_fdcan1(p.FDCAN1, p.PB9, p.PA11),
     }
 }

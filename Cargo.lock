@@ -78,18 +78,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bootloader"
-version = "0.1.0"
-dependencies = [
- "cortex-m",
- "cortex-m-rt",
- "embassy-stm32",
- "embedded-io 0.7.1",
- "embedded-storage",
- "foc-common",
-]
-
-[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -599,16 +587,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embedded-storage-inmemory"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f9d62933faa560308e912c975da0f5364b6ccd0f10fa675c5071023226986c9"
-dependencies = [
- "embedded-storage",
- "embedded-storage-async",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -630,11 +608,6 @@ dependencies = [
 [[package]]
 name = "foc-common"
 version = "0.1.0"
-dependencies = [
- "defmt 1.1.0",
- "embassy-stm32",
- "embedded-storage",
-]
 
 [[package]]
 name = "foc-rust"
@@ -645,15 +618,15 @@ dependencies = [
  "defmt 1.1.0",
  "defmt-rtt",
  "embassy-executor",
+ "embassy-futures",
  "embassy-stm32",
  "embassy-sync",
  "embassy-time",
+ "embedded-can",
  "embedded-cli",
  "embedded-io 0.6.1",
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
- "embedded-storage",
- "embedded-storage-inmemory",
  "foc-algo",
  "foc-common",
  "panic-probe",

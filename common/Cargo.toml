@@ -3,28 +3,10 @@ name = "foc-common"
 version = "0.1.0"
 edition = "2021"
 authors = ["heng"]
-description = "Shared constants and traits for foc-rust app + bootloader"
+description = "Shared, hardware-independent helpers for foc-rust"
 publish = false
 
 [dependencies]
-# Pure constants + OtaFlag trait. embedded-storage is dep-only for the trait bound,
-# not for any heavy runtime code.
-embedded-storage = "0.3"
-embassy-stm32 = { version = "0.6", optional = true, features = ["memory-x"] }
-
-defmt = { version = "1", optional = true }
 
 [features]
 default = []
-# App-facing: enables `defmt::Format` derive on FlagError. Re-declared
-# because the `dep:defmt` form below would otherwise drop the implicit
-# `defmt` feature name used by existing deps.
-defmt = ["dep:defmt"]
-# Pulls in embassy-stm32 so the flash driver compiles.
-flash-driver = ["dep:embassy-stm32"]
-# App-side convenience: derive `defmt::Format` on FlashError.
-defmt-format = ["dep:defmt"]
-
-[package.metadata.cargo-all-features]
-# Skip enabling flash-driver by default on host-side testing.
-denylist = ["flash-driver", "defmt-format"]

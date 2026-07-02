@@ -1,5 +1,5 @@
 [workspace]
-members = ["common", "bootloader", "foc-algo"]
+members = ["common", "foc-algo"]
 resolver = "2"
 
 [package]
@@ -10,16 +10,23 @@ authors = ["heng"]
 description = "Field Oriented Control firmware in Rust on B-G431B-ESC1"
 
 [dependencies]
-foc-common = { path = "common", features = ["defmt", "flash-driver", "defmt-format"] }
+foc-common = { path = "common" }
 foc-algo = { path = "foc-algo" }
 embassy-stm32 = { version = "0.6", features = ["stm32g431cb", "defmt", "time-driver-any", "unstable-pac", "memory-x"] }
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
 
 embassy-time = { version = "0.5", features = ["defmt", "tick-hz-32_768"] }
+embassy-futures = "0.1"
 embassy-sync = "0.8"
 embedded-io = "0.7"
 embedded-io-async = "0.7"
 embedded-io-06 = { package = "embedded-io", version = "0.6" }
+# `embedded_can` is the type-level surface (Id::Standard / Id::Extended
+# enum) used by the embassy CAN frame API. We pin to 0.4.1 to match
+# the version embassy-stm32 0.6 brings in transitively; using a
+# different version here causes "multiple different versions" errors
+# when matching on `frame.header().id()`.
+embedded-can = "0.4.1"
 
 defmt = "1"
 defmt-rtt = "1"
@@ -28,12 +35,9 @@ cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
 panic-probe = { version = "1", features = ["print-defmt"] }
 
-# Locked for next spec (shell task)
-embedded-storage = "0.3"
+# Shell uses embedded-cli's Command derive; CLI 0.2.1 depends on
+# embedded-io v0.6, hence the dual v0.6/v0.7 deps above.
 embedded-cli = { version = "0.2.1" }
-
-[dev-dependencies]
-embedded-storage-inmemory = "0.1"
 
 [profile.release]
 debug = 2
