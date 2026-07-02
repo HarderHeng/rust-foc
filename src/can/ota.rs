@@ -179,13 +179,19 @@ pub fn handle_transfer_data(payload: &[u8]) -> usize {
     }
     let seq = payload[0];
     let expected_seq = NEXT_BLOCK_SEQ.load(Ordering::Relaxed);
-    // v1 logs a warning on a bad seq but doesn't reject. The
-    // spec says NRC 0x73 wrongBlockSequenceNumber, which we'd
-    // send if the user re-asks the master to be strict.
+    // Per UDS, a wrong block sequence number ⇒ 0x73
+    // wrongBlockSequenceNumber. Reject the call so the master
+    // can re-sync; silently accepting lets blocks get lost
+    // and the eventual CRC mismatch has no way to point at
+    // the missing block.
     if seq != expected_seq {
         warn!(
-            "OTA: block seq {} (expected {})",
+            "OTA: block seq {} (expected {}) → 0x73",
             seq, expected_seq
+        );
+        return store_uds_negative(
+            SID_TRANSFER_DATA,
+            NRC::WrongBlockSequenceNumber,
         );
     }
     NEXT_BLOCK_SEQ.store(seq.wrapping_add(1), Ordering::Relaxed);
@@ -306,6 +312,12 @@ enum NRC {
     ConditionsNotCorrect      = 0x22,
     RequestOutOfRange         = 0x31,
     GeneralProgrammingFailure = 0x72,
+    /// 0x73 wrongBlockSequenceNumber. Per UDS, the 0x36 master
+    /// must send block seq 1, 2, 3, … wrapping at 0xFF→0x00.
+    /// Mismatch ⇒ 0x73. Was previously logged-and-ignored,
+    /// which let silent data loss through (CRC would later
+    /// mismatch without a way to tell which block was missed).
+    WrongBlockSequenceNumber  = 0x73,
 }
 
 /// Forward a UDS positive response into the `LAST_RESPONSE`

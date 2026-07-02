@@ -61,8 +61,23 @@ const SDO_CMD_ABORT: u8    = 0x80; // Abort Transfer
 const SDO_FLAG_E: u8 = 0x02;
 const SDO_FLAG_S: u8 = 0x01;
 
-/// n field mask (bits 2..5 of byte 0).
-const SDO_N_MASK: u8 = 0x1C;
+/// n field mask (bits 2..3 of byte 0, 2 bits).
+///
+/// Per CiA 301 § 7.2.4.3.2 the SDO command specifier layout for
+/// Initiate Download is:
+///
+///   bits 7..5 = CCS (0b001 for download initiate)
+///   bit  4   = reserved (0 for download initiate)
+///   bits 3..2 = n (number of data bytes NOT used in the 4-byte
+///                payload — so num_bytes = 4 - n)
+///   bit  1   = e (expedited)
+///   bit  0   = s (size indicator)
+///
+/// An earlier version of this file used `0x1C` here, which
+/// included bit 4 (the reserved bit) and caused 1-byte writes
+/// (cmd = 0x2F, where bit 4 is set in the CANopen spec) to
+/// compute `n = 7` and be rejected with InvalidCommand.
+const SDO_N_MASK: u8 = 0x0C;
 
 /// Parsed SDO request from a received frame's first 8 bytes.
 pub enum SdoRequest {

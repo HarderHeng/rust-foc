@@ -52,6 +52,14 @@ static SESSION: AtomicU8 = AtomicU8::new(SESSION_DEFAULT);
 /// = Unlocked (valid key received since last reset).
 static SECURITY: AtomicU8 = AtomicU8::new(0);
 
+/// `0x10 0x02` (enter ProgrammingSession) requires Unlocked;
+/// switching to Programming also resets this to Locked (per
+/// UDS convention — every session change invalidates prior
+/// security state).
+pub fn is_security_unlocked() -> bool {
+    SECURITY.load(Ordering::Relaxed) != 0
+}
+
 /// "Reset requested" flag. Set by 0x11 HardReset, polled by
 /// the canopen task. We use a flag + polling rather than
 /// firing the reset from inside the UDS handler because the
@@ -197,12 +205,30 @@ fn handle_session_control(payload: &[u8]) -> usize {
     }
     let subfunc = payload[0];
     match subfunc {
-        0x01 | 0x02 => {
+        0x01 => {
             SESSION.store(subfunc, Ordering::Relaxed);
             // Switching session also locks SecurityAccess — the
             // seed is invalidated by definition.
             SECURITY.store(0, Ordering::Relaxed);
-            info!("UDS: session → 0x{:02x}", subfunc);
+            info!("UDS: session → 0x{:02x} (Default)", subfunc);
+            store_positive(&[SID_DIAGNOSTIC_SESSION_CONTROL + 0x40, subfunc])
+        }
+        0x02 => {
+            // ProgrammingSession is a privileged transition
+            // (it gates the OTA path). Require SecurityAccess
+            // to be Unlocked; otherwise 0x33 SecurityAccessDenied.
+            if !is_security_unlocked() {
+                info!("UDS: ProgrammingSession rejected (security locked)");
+                return store_negative(
+                    SID_DIAGNOSTIC_SESSION_CONTROL,
+                    NRC::SecurityAccessDenied,
+                );
+            }
+            SESSION.store(subfunc, Ordering::Relaxed);
+            // Switching session also locks SecurityAccess — the
+            // seed is invalidated by definition.
+            SECURITY.store(0, Ordering::Relaxed);
+            info!("UDS: session → 0x02 (Programming)");
             store_positive(&[SID_DIAGNOSTIC_SESSION_CONTROL + 0x40, subfunc])
         }
         _ => store_negative(
