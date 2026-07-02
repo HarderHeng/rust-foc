@@ -1,25 +1,41 @@
-//! CANopen SDO server protocol — Phase 2 minimal subset.
+//! CANopen SDO server protocol — Phase 2 minimal subset, plus
+//! Phase 3 v2 segmented upload (server → client) and Phase 3 v3
+//! segmented download (client → server).
 //!
 //! Wire-level handling only. The Object Dictionary side of things
 //! lives in `super::od`. This module owns:
 //!   - Parsing incoming SDO request frames (Initiate Download /
-//!     Initiate Upload / Upload Segment) into a `SdoRequest` enum
+//!     Download Segment / Initiate Upload / Upload Segment) into
+//!     a `SdoRequest` enum
 //!   - Encoding SDO response frames (success or abort) into a
 //!     fresh 8-byte `Frame` ready to be sent on the SDO
 //!     server-transmit COB-ID (`0x580 + NodeId`)
-//!   - The segmented-upload state machine (Phase 3 v2): a static
-//!     buffer holds the bytes to deliver across one or more
-//!     Upload Segment responses after a segmented Initiate.
+//!   - The segmented-upload state machine: a static buffer holds
+//!     the bytes to deliver across one or more Upload Segment
+//!     responses after a segmented Initiate.
+//!   - The segmented-download state machine: a static buffer
+//!     accumulates bytes sent via one or more Download Segment
+//!     requests after a segmented Initiate; on the last segment
+//!     the buffered value is dispatched to the OD.
 //!
 //! ## Frame layout reminder
 //!
-//! Initiate Download Request (client → server, 8 bytes):
-//!   byte 0: 0x20 | e | s | (n2 | n1 | n0)   (e=1, s=1 for
-//!                                             expedited; n
-//!                                             encodes (4 - num
-//!                                             data bytes))
+//! Initiate Download Request — *expedited* (client → server, 8 bytes):
+//!   byte 0: 0x20 | e | s | (n2 | n1 | n0)
+//!             e=1, s=1, n encodes (4 - num_data_bytes)
 //!   bytes 1..3: index (LE u16) | subindex
-//!   bytes 4..7: data (LE, up to 4 bytes for expedited)
+//!   bytes 4..7: data (LE, up to 4 bytes)
+//!
+//! Initiate Download Request — *segmented* (client → server, 8 bytes):
+//!   byte 0: 0x21                                          (CCS=1, e=0, s=1)
+//!   bytes 1..3: index (LE u16) | subindex
+//!   bytes 4..5: total size (LE u16)                        — bounded to ≤ 7 bytes here
+//!   bytes 6..7: 0 bytes of data                           — first data follows in segments
+//!
+//! Download Segment Request (client → server, 8 bytes):
+//!   byte 0: 0x00 | (toggle<<4) | (n<<1) | c
+//!             c=1 iff this is the last segment, n = 7 - num_data_bytes
+//!   bytes 1..7: up to 7 bytes of data
 //!
 //! Initiate Download Response (server → client):
 //!   byte 0: 0x60 (success, no data)
@@ -58,7 +74,7 @@
 //!   bytes 4..7: abort code (LE u32)
 
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 
 use defmt::warn;
 use embassy_stm32::can::Frame;
@@ -75,6 +91,7 @@ pub const SDO_TX_COB_ID: u16 = 0x580 + NODE_ID as u16;
 /// Top-3-bit CCS/SCS field (byte 0, bits 7-5).
 const SDO_CMD_MASK: u8 = 0xE0;
 const SDO_CMD_DOWNLOAD:     u8 = 0x20; // CCS=1 — Initiate Download Request
+const SDO_CMD_DOWNLOAD_SEG: u8 = 0x00; // CCS=0 — Download Segment Request
 const SDO_CMD_UPLOAD:       u8 = 0x40; // CCS=2 — Initiate Upload Request
 const SDO_CMD_UPLOAD_SEG:   u8 = 0x60; // CCS=3 — Upload Segment Request (client asks for next chunk)
 const SDO_CMD_ABORT:        u8 = 0x80; // SCS=4 — Abort Transfer
@@ -117,8 +134,21 @@ const SEGMENTED_MAX: usize = 7;
 
 /// Parsed SDO request from a received frame's first 8 bytes.
 pub enum SdoRequest {
-    /// Client asks us to write a value into the OD.
+    /// Client asks us to write a value into the OD (expedited,
+    /// 1–4 bytes — all in one frame).
     Download { index: u16, sub: u8, value: OdValue },
+    /// Client asks us to start a segmented download (5–7 bytes
+    /// delivered across a subsequent Download Segment Request).
+    DownloadInitiate { index: u16, sub: u8, size: u8 },
+    /// Client sends the next chunk of a segmented download. If
+    /// `last` is true, the receiver has to dispatch the assembled
+    /// value; if false, more segments are coming.
+    DownloadSegment {
+        toggle: u8,
+        num_data_bytes: u8,
+        last: bool,
+        data: [u8; 7],
+    },
     /// Client asks us to read a value from the OD.
     Upload   { index: u16, sub: u8 },
     /// Client asks for the next segment of an in-flight
@@ -190,12 +220,122 @@ fn segmented_upload_next() -> Option<([u8; 7], usize, bool)> {
     Some((seg, chunk, last))
 }
 
+// ---- Segmented download state machine -------------------------------
+
+/// State for an in-flight segmented download. `bytes[0..offset]`
+/// is the value accumulated so far; `len` is the total expected
+/// size from the Initiate. When `len == 0` no download is in
+/// progress.
+static SDO_DOWNLOAD_BUF: critical_section::Mutex<RefCell<[u8; SEGMENTED_MAX]>> =
+    critical_section::Mutex::new(RefCell::new([0; SEGMENTED_MAX]));
+static SDO_DOWNLOAD_LEN: AtomicU8 = AtomicU8::new(0);
+static SDO_DOWNLOAD_OFFSET: AtomicU8 = AtomicU8::new(0);
+/// Toggle bit (0 or 1) we expect on the next Download Segment.
+/// Spec says the toggle alternates; we initialise to 0 on every
+/// Initiate and flip after each segment we accept.
+static SDO_DOWNLOAD_TOGGLE: AtomicU8 = AtomicU8::new(0);
+/// Index + sub stored at Initiate time so the segment requests
+/// (which carry no index/sub) can be routed back to the right
+/// OD entry when the last segment arrives.
+static SDO_DOWNLOAD_INDEX: AtomicU16 = AtomicU16::new(0);
+static SDO_DOWNLOAD_SUB: AtomicU8 = AtomicU8::new(0);
+
+/// Outcome of a Download Segment request.
+enum SegDownloadResult {
+    /// More segments are expected; reply with 0x60.
+    Continue,
+    /// Last segment — the assembled `value` should be dispatched
+    /// to the OD entry identified by `index.sub`.
+    Complete { index: u16, sub: u8, value: OdValue },
+}
+
+/// Start a segmented download of `size` bytes for the given OD
+/// entry. Clears any in-flight transfer state.
+fn segmented_download_begin(index: u16, sub: u8, size: u8) {
+    debug_assert!(size >= 5 && size as usize <= SEGMENTED_MAX);
+    SDO_DOWNLOAD_LEN.store(size, Ordering::Relaxed);
+    SDO_DOWNLOAD_OFFSET.store(0, Ordering::Relaxed);
+    SDO_DOWNLOAD_TOGGLE.store(0, Ordering::Relaxed);
+    SDO_DOWNLOAD_INDEX.store(index, Ordering::Relaxed);
+    SDO_DOWNLOAD_SUB.store(sub, Ordering::Relaxed);
+    critical_section::with(|cs| {
+        *SDO_DOWNLOAD_BUF.borrow_ref_mut(cs) = [0; SEGMENTED_MAX];
+    });
+}
+
+/// Append a Download Segment's bytes to the buffer. Returns the
+/// dispatcher-visible outcome (`Continue` if more segments are
+/// coming, `Complete` if this was the last segment). All other
+/// conditions (no Initiate in progress, toggle mismatch, size
+/// overflow, premature last-segment flag) map to an `InvalidCommand`
+/// abort and clear the download state.
+fn segmented_download_segment(
+    toggle: u8,
+    num_data_bytes: u8,
+    last: bool,
+    data: &[u8],
+) -> Result<SegDownloadResult, SdoAbort> {
+    let len = SDO_DOWNLOAD_LEN.load(Ordering::Relaxed);
+    if len == 0 {
+        // No Initiate in progress. Spec says: "If the server
+        // receives a Download Segment without a preceding
+        // Initiate, abort the transfer."
+        return Err(SdoAbort::InvalidCommand);
+    }
+    let expected_toggle = SDO_DOWNLOAD_TOGGLE.load(Ordering::Relaxed);
+    if toggle != expected_toggle {
+        // Toggle mismatch — abort and clear.
+        SDO_DOWNLOAD_LEN.store(0, Ordering::Relaxed);
+        return Err(SdoAbort::InvalidCommand);
+    }
+    let offset = SDO_DOWNLOAD_OFFSET.load(Ordering::Relaxed);
+    let new_offset = offset
+        .checked_add(num_data_bytes)
+        .filter(|&n| n <= len)
+        .ok_or_else(|| {
+            // Overflow or segment bigger than remaining capacity.
+            SDO_DOWNLOAD_LEN.store(0, Ordering::Relaxed);
+            SdoAbort::InvalidCommand
+        })?;
+
+    critical_section::with(|cs| {
+        let buf = &mut *SDO_DOWNLOAD_BUF.borrow_ref_mut(cs);
+        for i in 0..(num_data_bytes as usize) {
+            buf[offset as usize + i] = data[i];
+        }
+    });
+    SDO_DOWNLOAD_OFFSET.store(new_offset, Ordering::Relaxed);
+    SDO_DOWNLOAD_TOGGLE.store(expected_toggle ^ 1, Ordering::Relaxed);
+
+    if last {
+        if new_offset != len {
+            // `last` came too early or too late.
+            SDO_DOWNLOAD_LEN.store(0, Ordering::Relaxed);
+            return Err(SdoAbort::InvalidCommand);
+        }
+        let index = SDO_DOWNLOAD_INDEX.load(Ordering::Relaxed);
+        let sub = SDO_DOWNLOAD_SUB.load(Ordering::Relaxed);
+        let bytes = critical_section::with(|cs| *SDO_DOWNLOAD_BUF.borrow_ref(cs));
+        // Clear state so the next Initiate starts clean.
+        SDO_DOWNLOAD_LEN.store(0, Ordering::Relaxed);
+        SDO_DOWNLOAD_OFFSET.store(0, Ordering::Relaxed);
+        Ok(SegDownloadResult::Complete {
+            index,
+            sub,
+            value: OdValue { bytes, len },
+        })
+    } else {
+        Ok(SegDownloadResult::Continue)
+    }
+}
+
 // ---- Parsing ---------------------------------------------------------
 
 /// Parse a received SDO request frame. Returns `None` for
-/// non-SDO COB-IDs, abort transfers (Phase 2 v1 only handles
-/// expedited download + expedited/segmented upload), and
-/// unknown command specifiers.
+/// non-SDO COB-IDs and abort transfers (a client-initiated abort
+/// is silently consumed because per spec it carries no payload to
+/// reply to). Unknown command specifiers return
+/// `Some(Err(SdoAbort::InvalidCommand))`.
 ///
 /// `data` is the 8-byte payload of the frame (passed in as a
 /// slice so callers can decide how to copy; we never modify it).
@@ -212,28 +352,61 @@ pub fn parse_request(data: &[u8]) -> Option<Result<SdoRequest, SdoAbort>> {
         SDO_CMD_DOWNLOAD => {
             let e = cmd & SDO_FLAG_E;
             let s = cmd & SDO_FLAG_S;
-            if e == 0 || s == 0 {
-                // Segmented or no-size. Not supported in Phase 2.
-                // (OTA's 0x34 RequestDownload is 5 bytes — the
-                // 0x2F00 gateway would need segmented download
-                // to receive it. Deferred to a later phase.)
+            if e != 0 && s != 0 {
+                // Expedited Initiate Download.
+                let n = (cmd & SDO_N_MASK) >> 2;
+                if n > 3 {
+                    return Some(Err(SdoAbort::InvalidCommand));
+                }
+                let num_bytes = 4 - n;
+                let mut bytes = [0u8; 7];
+                for i in 0..(num_bytes as usize) {
+                    bytes[i] = data[4 + i];
+                }
+                Some(Ok(SdoRequest::Download {
+                    index,
+                    sub,
+                    value: OdValue { bytes, len: num_bytes as u8 },
+                }))
+            } else if e == 0 && s != 0 {
+                // Segmented Initiate Download (0x21). Size in
+                // bytes 4–5 LE; we cap at 7 bytes (matching
+                // SEGMENTED_MAX on the upload side).
+                let size = u16::from_le_bytes([data[4], data[5]]) as u8;
+                if size < 5 || (size as usize) > SEGMENTED_MAX {
+                    return Some(Err(SdoAbort::InvalidCommand));
+                }
+                Some(Ok(SdoRequest::DownloadInitiate { index, sub, size }))
+            } else {
+                // e=1, s=0 (initiate, no size — only meaningful for
+                // download segments ≥ 4 bytes, but no data fits in
+                // a single 8-byte frame, so we reject) or e=0, s=0
+                // (initiate, no size, no data — reserved).
+                Some(Err(SdoAbort::InvalidCommand))
+            }
+        }
+        SDO_CMD_DOWNLOAD_SEG => {
+            // Download Segment Request (0x00). Byte 0 layout:
+            //   bit 0: c (1 if last segment)
+            //   bits 1..2: n (7 - num_data_bytes)
+            //   bit 4: toggle
+            //   bits 5..7: 0 (CCS = 0)
+            let toggle = (cmd >> 4) & 0x01;
+            let n = (cmd >> 1) & 0x03;
+            let last = (cmd & 0x01) != 0;
+            let num_data_bytes = (7 - n) as u8;
+            if num_data_bytes > 7 {
                 return Some(Err(SdoAbort::InvalidCommand));
             }
-            let n = (cmd & SDO_N_MASK) >> 2;
-            // n = 4 - num_data_bytes, so num_data_bytes = 4 - n.
-            // Valid range: n in 0..=3 (1..=4 bytes).
-            if n > 3 {
-                return Some(Err(SdoAbort::InvalidCommand));
+            let mut seg_data = [0u8; 7];
+            for i in 0..(num_data_bytes as usize) {
+                seg_data[i] = data[1 + i];
             }
-            let num_bytes = 4 - n;
-            let mut bytes = [0u8; 7];
-            for i in 0..(num_bytes as usize) {
-                bytes[i] = data[4 + i];
-            }
-            Some(Ok(SdoRequest::Download {
-                index,
-                sub,
-                value: OdValue { bytes, len: num_bytes as u8 },
+            Some(Ok(SdoRequest::DownloadSegment {
+                toggle,
+                num_data_bytes,
+                last,
+                data: seg_data,
             }))
         }
         SDO_CMD_UPLOAD => {
@@ -249,10 +422,12 @@ pub fn parse_request(data: &[u8]) -> Option<Result<SdoRequest, SdoAbort>> {
         SDO_CMD_ABORT => {
             // A client-initiated abort. We don't have any state to
             // tear down (no segmented transfer), so just ignore.
-            // (If we're mid segmented-upload, the spec says clear
-            // state; we do that defensively.)
+            // (If we're mid segmented-transfer on either side, the
+            // spec says clear state; we do that defensively.)
             SDO_UPLOAD_LEN.store(0, Ordering::Relaxed);
             SDO_UPLOAD_OFFSET.store(0, Ordering::Relaxed);
+            SDO_DOWNLOAD_LEN.store(0, Ordering::Relaxed);
+            SDO_DOWNLOAD_OFFSET.store(0, Ordering::Relaxed);
             None
         }
         _ => Some(Err(SdoAbort::InvalidCommand)),
@@ -395,6 +570,55 @@ pub fn dispatch(data: &[u8]) -> Option<Frame> {
                 Err(abort) => {
                     warn!("SDO: write 0x{:04x}:{} abort 0x{:08x}", index, sub, abort.code());
                     Some(build_abort_response(index, sub, abort))
+                }
+            }
+        }
+        SdoRequest::DownloadInitiate { index, sub, size } => {
+            // Clear any in-flight upload state — the spec says a
+            // server aborts the *other* direction's transfer when
+            // it starts a new one in the opposite direction.
+            // (Defensive; we don't strictly need this for
+            // correctness because the upload segment request would
+            // still see valid state.)
+            SDO_UPLOAD_LEN.store(0, Ordering::Relaxed);
+            SDO_UPLOAD_OFFSET.store(0, Ordering::Relaxed);
+            segmented_download_begin(index, sub, size);
+            defmt::info!(
+                "SDO: download-initiate 0x{:04x}:{} size={}",
+                index, sub, size
+            );
+            Some(build_download_ok_response())
+        }
+        SdoRequest::DownloadSegment { toggle, num_data_bytes, last, data } => {
+            match segmented_download_segment(
+                toggle, num_data_bytes, last, &data[..num_data_bytes as usize],
+            ) {
+                Ok(SegDownloadResult::Continue) => {
+                    defmt::info!(
+                        "SDO: download-segment toggle {} ({} bytes, more coming)",
+                        toggle, num_data_bytes
+                    );
+                    Some(build_download_ok_response())
+                }
+                Ok(SegDownloadResult::Complete { index, sub, value }) => {
+                    defmt::info!(
+                        "SDO: download-segment last → write 0x{:04x}:{} = {} bytes",
+                        index, sub, value.len
+                    );
+                    match od_write(index, sub, value) {
+                        Ok(()) => Some(build_download_ok_response()),
+                        Err(abort) => {
+                            warn!(
+                                "SDO: download-write 0x{:04x}:{} abort 0x{:08x}",
+                                index, sub, abort.code()
+                            );
+                            Some(build_abort_response(index, sub, abort))
+                        }
+                    }
+                }
+                Err(abort) => {
+                    warn!("SDO: download-segment abort 0x{:08x}", abort.code());
+                    Some(build_abort_response(0, 0, abort))
                 }
             }
         }
