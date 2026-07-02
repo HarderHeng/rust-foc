@@ -1,17 +1,21 @@
 //! Shell command implementations for embedded-cli.
 //!
-//! Defines a `#[derive(Command)]` enum `ShellCommand` with 5 unit variants:
-//!   - `help`   — list available commands (built-in from embedded-cli via `-h`)
-//!   - `version`— firmware version string
-//!   - `info`   — chip + flash usage info
-//!   - `reboot` — reset the MCU
-//!   - `ota_update` — set OTA flag and reboot into bootloader
+//! Defines a `#[derive(Command)]` enum `ShellCommand` with seven variants:
+//!   - `help`        — list available commands
+//!   - `version`     — firmware version string
+//!   - `info`        — chip + flash usage info
+//!   - `reboot`      — reset the MCU
+//!   - `ota_update`  — set OTA flag and reboot into bootloader
+//!   - `spin <f> <v>`— start open-loop rotating voltage vector
+//!   - `stop`        — soft-stop the open-loop spin
 
 use cortex_m::peripheral::SCB;
 use embedded_cli::cli::CliHandle;
 
 use crate::bsp::{BOARD_MCU, BOARD_NAME, FLASH_SIZE_KB, SRAM_SIZE_KB};
 use crate::commands::ota::run_ota_update;
+use crate::control::cmd::{OpenLoopCmd, OPEN_LOOP_CMD};
+use crate::control::open_loop::MAX_OPENLOOP_V;
 
 // ---------------------------------------------------------------------------
 // ShellCommand enum — one variant per shell command
@@ -21,7 +25,9 @@ use crate::commands::ota::run_ota_update;
 ///
 /// The `#[command(name = "...")]` attributes supply the command name; the
 /// first paragraph of the doc comment is the short help text shown by
-/// `help` / `-h`.
+/// `help` / `-h`. Struct-variant fields with no `#[arg(...)]` attribute
+/// become **positional** args — `spin 10 2.0` parses into
+/// `Spin { freq_hz: 10.0, voltage: 2.0 }`.
 #[derive(embedded_cli::Command)]
 pub enum ShellCommand {
     /// List available commands
@@ -43,6 +49,16 @@ pub enum ShellCommand {
     /// Trigger OTA firmware update
     #[command(name = "ota_update")]
     OtaUpdate,
+
+    /// Start the open-loop spin: `<freq_hz> <voltage>`
+    /// (electrical frequency of the rotating vector, peak phase voltage).
+    /// Voltage is clamped to `MAX_OPENLOOP_V` (= 3.0 V) for safety.
+    #[command(name = "spin")]
+    Spin { freq_hz: f32, voltage: f32 },
+
+    /// Soft-stop the open-loop spin (voltage ramps to 0, then MOE = 0)
+    #[command(name = "stop")]
+    Stop,
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +132,64 @@ where
             ShellCommand::OtaUpdate => {
                 run_ota_update(cli);
             }
+            ShellCommand::Spin { freq_hz, voltage } => {
+                run_spin(cli, freq_hz, voltage);
+            }
+            ShellCommand::Stop => {
+                run_stop(cli);
+            }
         }
         Ok(())
     })
+}
+
+// ---------------------------------------------------------------------------
+// spin / stop — write the shared `OPEN_LOOP_CMD`.
+// ---------------------------------------------------------------------------
+
+/// Handle `spin <freq_hz> <voltage>`.
+///
+/// Clamps `voltage` to `[0, MAX_OPENLOOP_V]` and warns the user on the
+/// serial line if their input was out of range. Frequency is taken
+/// verbatim — the motor task's `advance_angle` wraps `θ` so any finite
+/// value is safe.
+fn run_spin<W, E>(cli: &mut CliHandle<'_, W, E>, freq_hz: f32, voltage: f32)
+where
+    W: embedded_cli::__private::io::Write<Error = E>,
+    E: embedded_cli::__private::io::Error,
+{
+    if !freq_hz.is_finite() || !voltage.is_finite() {
+        let _ = cli.writer().write_str("spin: freq/voltage must be finite\r\n");
+        return;
+    }
+    if voltage < 0.0 {
+        let _ = cli.writer().write_str("spin: voltage must be ≥ 0; ignored\r\n");
+        return;
+    }
+    let clamped = if voltage > MAX_OPENLOOP_V {
+        let _ = cli.writer().write_str("spin: voltage clamped to MAX_OPENLOOP_V\r\n");
+        MAX_OPENLOOP_V
+    } else {
+        voltage
+    };
+    let cmd = OpenLoopCmd { enabled: true, freq_hz, voltage: clamped };
+    OPEN_LOOP_CMD.lock(|c| c.set(cmd));
+    let _ = cli.writer().write_str("spin ok\r\n");
+}
+
+fn run_stop<W, E>(cli: &mut CliHandle<'_, W, E>)
+where
+    W: embedded_cli::__private::io::Write<Error = E>,
+    E: embedded_cli::__private::io::Error,
+{
+    // Read-modify-write so a `stop` doesn't accidentally clear
+    // frequency/voltage that the user might want to keep for the
+    // next `spin` (the motor task ramps them from current value to 0
+    // on the `enabled` edge).
+    OPEN_LOOP_CMD.lock(|c| {
+        let mut cmd = c.get();
+        cmd.enabled = false;
+        c.set(cmd);
+    });
+    let _ = cli.writer().write_str("stop ok\r\n");
 }

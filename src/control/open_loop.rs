@@ -129,6 +129,14 @@ impl OpenLoop {
 mod tests {
     use super::*;
 
+    // Host-only tests. They run via the standard `cargo test
+    // --bin foc-rust` invocation on a host toolchain that can build
+    // the bin (not the `thumbv7em-none-eabihf` target). The
+    // embedded-storage-inmemory dev-dep currently breaks the
+    // host-bin build, so these tests are not run in CI today;
+    // they document the expected behaviour and will light up
+    // once that build chain is set up.
+
     fn approx(a: f32, b: f32, tol: f32) {
         assert!((a - b).abs() < tol, "expected {b}, got {a} (tol {tol})");
     }

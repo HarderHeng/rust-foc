@@ -40,11 +40,19 @@ async fn main(spawner: Spawner) {
     let buffered_uart: BufferedUart<'static> = handles.debug_uart.into_inner();
     let (tx, rx) = buffered_uart.split();
 
+    // The motor task owns the only `&mut MotorPwm` for the lifetime
+    // of the executor. Move it out of `handles` before spawning.
+    let motor_pwm = handles.motor_pwm;
+
     // Spawn the heartbeat task (defmt-only, no USART2).
     spawner.spawn(tasks::heartbeat().unwrap());
 
     // Spawn the shell task — takes ownership of TX and RX halves.
     spawner.spawn(tasks::shell_task(tx, rx).unwrap());
+
+    // Spawn the motor task — 10 kHz Ticker that drives TIM1 from the
+    // shared `OPEN_LOOP_CMD` cell written by the shell.
+    spawner.spawn(tasks::motor_task(motor_pwm).unwrap());
 
     // Main task: park in WFI forever. Real work happens in spawned tasks.
     loop {
