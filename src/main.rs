@@ -6,6 +6,7 @@ mod can;
 mod commands;
 mod control;
 mod drivers;
+mod hal;
 mod metadata;
 mod tasks;
 

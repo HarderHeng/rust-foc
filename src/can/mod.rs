@@ -21,6 +21,7 @@
 
 pub mod canopen;
 pub mod od;
+pub mod ota;
 pub mod sdo;
 pub mod uds;
 

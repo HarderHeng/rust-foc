@@ -43,6 +43,7 @@ use embassy_stm32::can::{Can, Frame};
 use embassy_time::{Duration, Ticker};
 
 use super::od::heartbeat_period_ms;
+use super::ota;
 use super::sdo::{self, is_sdo_request};
 use super::uds;
 
@@ -207,15 +208,18 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                         }
                         // After sending the SDO response, check
                         // whether a UDS HardReset was requested
-                        // (0x11 0x01). The reset is fired from
-                        // here — not from inside the UDS handler
-                        // — so the response has time to make it
-                        // out before NVIC tears the chip down.
-                        if uds::take_reset_request() {
-                            info!("UDS: NVIC reset in 10 ms");
+                        // (0x11 0x01) or an OTA TransferExit
+                        // (0x37) finished — both arms the same
+                        // reset flag. We fire the NVIC reset
+                        // from here — not from inside the
+                        // handlers — so the response has time
+                        // to make it out before NVIC tears
+                        // the chip down.
+                        if uds::take_reset_request() || ota::take_reset_request() {
+                            info!("UDS/OTA: NVIC reset in 10 ms");
                             // 10 ms at 170 MHz; lets the last
-                            // TX byte (and any pending CAN frame)
-                            // reach the wire.
+                            // TX byte (and any pending CAN
+                            // frame) reach the wire.
                             cortex_m::asm::delay(170_000_000 / 100);
                             SCB::sys_reset();
                         }

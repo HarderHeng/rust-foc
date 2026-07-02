@@ -98,6 +98,28 @@ pub fn dispatch(request: &[u8]) -> usize {
         SID_WRITE_DATA_BY_IDENTIFIER => handle_write_did(payload),
         SID_SECURITY_ACCESS => handle_security_access(payload),
         SID_TESTER_PRESENT => handle_tester_present(payload),
+        // Phase 4: OTA via UDS TransferData. All three SIDs
+        // require the controller to be in ProgrammingSession
+        // (0x02); otherwise we return NRC 0x22
+        // ConditionsNotCorrect.
+        SID_REQUEST_DOWNLOAD => {
+            if SESSION.load(Ordering::Relaxed) != 0x02 {
+                return store_negative(sid, NRC::ConditionsNotCorrect);
+            }
+            super::ota::handle_request_download(payload)
+        }
+        SID_TRANSFER_DATA => {
+            if SESSION.load(Ordering::Relaxed) != 0x02 {
+                return store_negative(sid, NRC::ConditionsNotCorrect);
+            }
+            super::ota::handle_transfer_data(payload)
+        }
+        SID_REQUEST_TRANSFER_EXIT => {
+            if SESSION.load(Ordering::Relaxed) != 0x02 {
+                return store_negative(sid, NRC::ConditionsNotCorrect);
+            }
+            super::ota::handle_transfer_exit(payload)
+        }
         _ => store_negative(sid, NRC::SubFunctionNotSupported),
     }
 }
@@ -141,6 +163,12 @@ const SID_TESTER_PRESENT: u8 = 0x3E;
 
 /// 0xF186 = ActiveDiagnosticSession. Read-only 1-byte value.
 const DID_ACTIVE_DIAG_SESSION: [u8; 2] = [0x86, 0xF1];
+
+// ---- Re-export OTA service IDs (Phase 4) -----------------------------
+
+pub use super::ota::SID_REQUEST_DOWNLOAD;
+pub use super::ota::SID_TRANSFER_DATA;
+pub use super::ota::SID_REQUEST_TRANSFER_EXIT;
 
 // ---- NRCs (UDS spec) -------------------------------------------------
 
@@ -380,10 +408,21 @@ fn store_positive(payload: &[u8]) -> usize {
 
 /// Store a negative response (`[0x7F, SID, NRC]`) and return 3.
 fn store_negative(sid: u8, nrc: NRC) -> usize {
-    let buf = [0x7F, sid, nrc as u8, 0, 0, 0, 0];
+    store_external_response(&[0x7F, sid, nrc as u8])
+}
+
+/// External entry point for storing a UDS response without
+/// going through the local `store_positive` / `store_negative`
+/// helpers. Used by `super::ota` to push a response that
+/// originates from a different code path (still inside the
+/// single-threaded canopen task, so no race).
+pub fn store_external_response(payload: &[u8]) -> usize {
+    let len = payload.len();
+    let mut buf = [0u8; 7];
+    buf[..len.min(7)].copy_from_slice(&payload[..len.min(7)]);
     critical_section::with(|cs| {
         *LAST_RESPONSE.borrow_ref_mut(cs) = buf;
     });
-    LAST_RESPONSE_LEN.store(3, Ordering::Relaxed);
-    3
+    LAST_RESPONSE_LEN.store(len.min(7) as u8, Ordering::Relaxed);
+    len.min(7)
 }
