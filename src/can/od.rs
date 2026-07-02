@@ -24,23 +24,50 @@
 
 use core::sync::atomic::{AtomicU16, Ordering};
 
-/// Object Dictionary value types. We carry a single `u32` (big
-/// enough to hold u8, u16, u32) and a separate size hint so the
-/// SDO layer can choose the right command-specifier byte
-/// (`0x4F` for 1 byte, `0x4B` for 2, `0x47` for 3, `0x43` for 4).
+/// Object Dictionary value types. Phase 2 v1 stored a u32 +
+/// 1-byte length; Phase 3 grew it to 7 bytes so the UDS seed
+/// response (6 bytes — `[0x67, 0x01, seed_0..3]`) fits in a
+/// segmented SDO upload. The SDO layer chooses between expedited
+/// transfer (1–4 bytes) and segmented transfer (5–7 bytes) based
+/// on `len`.
+///
+/// Wire layouts:
+///
+///   expedited (len ≤ 4): `bytes[0..len]` are LE; the SDO response
+///     uses cmd 0x8F/0x8E/0x8D/0x8C (server Upload Initiate
+///     Response, e=1, s=1, n=3..0).
+///
+///   segmented (len > 4): `bytes[0..len]` are the whole response;
+///     the SDO layer emits 0x82 (Initiate, segmented, with size)
+///     then 0xA0/A1 segment responses. See `super::sdo`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct OdValue {
-    /// Number of significant bytes when laid out little-endian in
-    /// the SDO payload (1, 2, 3, or 4).
-    pub size: u8,
-    /// The value, stored in the low `size` bytes (little-endian).
-    pub bits: u32,
+    /// Raw bytes in little-endian order. Only `bytes[0..len]` are
+    /// valid; the rest are padding and must be ignored.
+    pub bytes: [u8; 7],
+    /// Number of significant bytes (1..=7).
+    pub len: u8,
 }
 
 impl OdValue {
-    pub const fn u8(v: u8) -> Self { Self { size: 1, bits: v as u32 } }
-    pub const fn u16(v: u16) -> Self { Self { size: 2, bits: v as u32 } }
-    pub const fn u32(v: u32) -> Self { Self { size: 4, bits: v } }
+    pub const fn u8(v: u8) -> Self {
+        Self { bytes: [v, 0, 0, 0, 0, 0, 0], len: 1 }
+    }
+    pub const fn u16(v: u16) -> Self {
+        Self { bytes: [v as u8, (v >> 8) as u8, 0, 0, 0, 0, 0], len: 2 }
+    }
+    pub const fn u32(v: u32) -> Self {
+        Self {
+            bytes: [
+                v as u8,
+                (v >> 8) as u8,
+                (v >> 16) as u8,
+                (v >> 24) as u8,
+                0, 0, 0,
+            ],
+            len: 4,
+        }
+    }
 }
 
 /// Heartbeat producer period in milliseconds. Read + written by
@@ -93,8 +120,8 @@ pub fn write(index: u16, sub: u8, value: OdValue) -> Result<(), SdoAbort> {
         // RW: heartbeat producer time. Accept u16 (2 bytes); any
         // other size is a length mismatch.
         (0x1017, 0) => {
-            if value.size == 2 {
-                set_heartbeat_period_ms(value.bits as u16);
+            if value.len == 2 {
+                set_heartbeat_period_ms(u16::from_le_bytes([value.bytes[0], value.bytes[1]]));
                 Ok(())
             } else {
                 Err(SdoAbort::LengthMismatch)
@@ -105,13 +132,18 @@ pub fn write(index: u16, sub: u8, value: OdValue) -> Result<(), SdoAbort> {
         // read on this index.
         (0x2F00, 0) => {
             // The SDO write hands us an `OdValue` whose low
-            // `size` bytes are the UDS request payload. Re-pack
-            // into a slice and dispatch.
-            let mut bytes = [0u8; 4];
-            for i in 0..(value.size as usize).min(4) {
-                bytes[i] = ((value.bits >> (8 * i)) & 0xFF) as u8;
-            }
-            super::uds::dispatch(&bytes[..value.size as usize]);
+            // `len` bytes are the UDS request payload. Slice
+            // off `len` bytes and dispatch.
+            //
+            // Note: Phase 3 v1 fits every UDS request in ≤ 4 bytes
+            // (all requests except 0x34 RequestDownload). The 0x34
+            // OTA path needs segmented SDO write to deliver its
+            // 6-byte payload; that path is deferred to a later
+            // phase. The Python smoke test for OTA exercises the
+            // board's segmented-upload path only — i.e. reading
+            // 0x2F00.0 after a simulated write — and the UDS
+            // request is constructed off-board for now.
+            super::uds::dispatch(&value.bytes[..value.len as usize]);
             Ok(())
         }
         // RO: everything else in v1.

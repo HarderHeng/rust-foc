@@ -9,11 +9,12 @@
 //!      the response is the UDS positive / negative response
 //!      that the gateway stored while dispatching the request.
 //!
-//! Response payloads are bounded to 4 bytes so they fit SDO
-//! expedited transfer. The 0x27 SecurityAccess seed is 2 bytes
-//! (truncated from the spec's 4-byte placeholder seed) for the
-//! same reason. Phase 3+ (or v2 of this module) would grow
-//! segmented SDO transfer for the longer services.
+//! Response payloads are bounded to 7 bytes (1–4 bytes use
+//! expedited SDO upload; 5–7 bytes use segmented SDO upload).
+//! The 0x27 SecurityAccess seed is 4 bytes (`0xA5A5_A5A5`),
+//! producing a 6-byte positive response
+//! `[0x67, 0x01, 0xA5, 0xA5, 0xA5, 0xA5]` that goes out via the
+//! segmented path.
 //!
 //! ## Services implemented (v1)
 //!
@@ -25,7 +26,7 @@
 //! | 0x19 | ReadDTCInformation    | subfunc 0x02: 0 DTCs |
 //! | 0x22 | ReadDataByIdentifier  | 0xF186 (ActiveDiagSession, 1 byte) only |
 //! | 0x2E | WriteDataByIdentifier | ack (no DIDs writable in v1) |
-//! | 0x27 | SecurityAccess        | seed=0xA5A5, key=0xA5B7 (2-byte truncated) |
+//! | 0x27 | SecurityAccess        | seed=0xA5A5A5A5, key=0xA5A5B7D9 (4-byte; +0x1234) |
 //! | 0x3E | TesterPresent         | subfunc 0x00, 0x80 (suppress positive) |
 //!
 //! ## Negative response codes (NRCs)
@@ -136,17 +137,14 @@ pub fn dispatch(request: &[u8]) -> usize {
 /// canopen OD layer calls this for SDO reads of `0x2F00.0`.
 pub fn load_response() -> super::od::OdValue {
     let len = LAST_RESPONSE_LEN.load(Ordering::Relaxed) as usize;
-    let mut bytes = [0u8; 8];
-    let mut bits: u32 = 0;
-    let n = len.min(4);
+    let mut bytes = [0u8; 7];
     critical_section::with(|cs| {
         let buf = LAST_RESPONSE.borrow_ref(cs);
-        for i in 0..n {
+        for i in 0..len.min(7) {
             bytes[i] = buf[i];
-            bits |= (buf[i] as u32) << (8 * i);
         }
     });
-    super::od::OdValue { size: n as u8, bits }
+    super::od::OdValue { bytes, len: len as u8 }
 }
 
 /// True iff the canopen task should perform an NVIC system
@@ -339,10 +337,14 @@ fn handle_security_access(payload: &[u8]) -> usize {
     }
     let subfunc = payload[0];
     match subfunc {
-        // requestSeed: respond with a 2-byte seed (the spec
-        // example seed is 4 bytes; we truncate to fit SDO
-        // expedited 4-byte response). Subfunc 0x01 is "request
-        // seed level 1".
+        // requestSeed: respond with a 4-byte seed (the spec's
+        // example seed is 4 bytes; Phase 3 v1 was truncated to
+        // 2 bytes because SDO expedited upload caps at 4 bytes
+        // per response — including the SID+subfunc bytes, that
+        // left only 2 bytes for the seed itself). Phase 3 v2
+        // lifted the cap to 7 bytes (via segmented SDO upload),
+        // so the seed is now 4 bytes again. Subfunc 0x01 is
+        // "request seed level 1".
         0x01 => {
             if SECURITY.load(Ordering::Relaxed) != 0 {
                 // Already unlocked: spec says "requestSeed when
@@ -352,30 +354,34 @@ fn handle_security_access(payload: &[u8]) -> usize {
                     NRC::SecurityAccessDenied,
                 );
             }
-            // Seed = 0xA5A5 (2 bytes; the high 2 bytes of the
-            // spec's 4-byte seed are dropped to fit SDO).
+            // Seed = 0xA5A5A5A5 (4 bytes, LE).
+            // Response: [0x67, 0x01, 0xA5, 0xA5, 0xA5, 0xA5] (6 bytes).
             store_positive(&[
                 SID_SECURITY_ACCESS + 0x40,
                 0x01,
-                0xA5, 0xA5,
+                0xA5, 0xA5, 0xA5, 0xA5,
             ])
         }
-        // sendKey: payload = [0x02, key_lo, key_hi, ...]
+        // sendKey: payload = [0x02, key_b0, key_b1, key_b2, key_b3]
         0x02 => {
-            if payload.len() != 3 {
+            if payload.len() != 5 {
                 return store_negative(
                     SID_SECURITY_ACCESS,
                     NRC::IncorrectMessageLength,
                 );
             }
-            // Expected key: seed + 0x12 = 0xA5A5 + 0x12 = 0xA5B7.
-            let key = u16::from_le_bytes([payload[1], payload[2]]);
-            if key == 0xA5B7 {
+            // Expected key: seed + 0x1234 = 0xA5A5A5A5 + 0x1234 =
+            // 0xA5A5_B7D9. (Phase 3 v1 had +0x12; v2 widens to
+            // 4-byte key to match the 4-byte seed.)
+            let key = u32::from_le_bytes([
+                payload[1], payload[2], payload[3], payload[4],
+            ]);
+            if key == 0xA5A5_B7D9 {
                 SECURITY.store(1, Ordering::Relaxed);
                 info!("UDS: SecurityAccess unlocked");
                 store_positive(&[SID_SECURITY_ACCESS + 0x40, 0x02])
             } else {
-                info!("UDS: SecurityAccess wrong key 0x{:04x}", key);
+                info!("UDS: SecurityAccess wrong key 0x{:08x}", key);
                 store_negative(
                     SID_SECURITY_ACCESS,
                     NRC::SecurityAccessDenied,
@@ -416,12 +422,19 @@ fn handle_tester_present(payload: &[u8]) -> usize {
 /// Store a positive response (`[SID+0x40, ...]`) and return its
 /// length. The response is also left in `LAST_RESPONSE` for the
 /// SDO read on `0x2F00.0` to fetch.
+///
+/// Length is bounded by SDO upload ceiling: ≤ 4 bytes fits
+/// expedited; 5–7 bytes needs segmented upload. Phase 3 v2
+/// supports up to 7 bytes (the SecurityAccess seed response is
+/// 6 bytes). Anything beyond 7 is a programming bug — return
+/// `ResponseTooLong` so the caller sees the constraint.
 fn store_positive(payload: &[u8]) -> usize {
     let len = payload.len();
-    if len > 4 {
-        // Shouldn't happen for v1, but defensively: any service
-        // that would produce a >4-byte response is misdesigned.
-        return store_negative(payload[0].saturating_sub(0x40), NRC::ResponseTooLong);
+    if len > 7 {
+        return store_negative(
+            payload.first().copied().unwrap_or(0).saturating_sub(0x40),
+            NRC::ResponseTooLong,
+        );
     }
     let mut buf = [0u8; 7];
     buf[..len].copy_from_slice(payload);
