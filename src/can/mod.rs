@@ -20,6 +20,8 @@
 //! SDO object; Phase 4 adds OTA over the UDS TransferData flow.
 
 pub mod canopen;
+pub mod od;
+pub mod sdo;
 
 use defmt::info;
 use embassy_stm32::{

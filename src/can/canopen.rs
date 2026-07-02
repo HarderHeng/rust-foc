@@ -34,19 +34,25 @@
 //! for "all", not a wildcard per se — we treat `0x00` and any
 //! `node_id != 1` as "not for us" and ignore).
 
+use core::sync::atomic::{AtomicU16, Ordering};
+
 use defmt::{info, warn};
 use embassy_futures::select::{select, Either};
 use embassy_stm32::can::{Can, Frame};
 use embassy_time::{Duration, Ticker};
 
+use super::od::heartbeat_period_ms;
+use super::sdo::{self, is_sdo_request};
+
+/// Cache of the last heartbeat period the ticker was re-armed
+/// with. Used to avoid re-allocating the `Ticker` on every
+/// tick (which is what the naive `Ticker::every(...)` in the
+/// `Either::Second` arm would do).
+static LAST_HEARTBEAT_PERIOD_MS: AtomicU16 = AtomicU16::new(0);
+
 /// Default NodeId. Hardcoded per Phase 1 spec; LSS service in a
 /// later milestone can override at runtime.
 pub const NODE_ID: u8 = 1;
-
-/// Heartbeat producer period. 1 Hz is the conventional default
-/// for CiA 301; the producer time is an OD entry (`0x1017`) so
-/// Phase 2 can make this RW.
-pub const HEARTBEAT_PERIOD_MS: u64 = 1000;
 
 /// COB-IDs derived from NodeId. Computed once at compile time
 /// would be nicer, but `const fn` for `u16 + u8` in older Rust
@@ -146,19 +152,24 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
     let mut state = NmtState::PreOperational;
     info!("CANopen: state → Pre-Operational");
 
-    let mut heartbeat = Ticker::every(Duration::from_millis(HEARTBEAT_PERIOD_MS));
+    // Initial heartbeat ticker; the period may be changed at
+    // runtime by writing 0x1017.0 via SDO. We poll the static
+    // each tick — `AtomicU16::load` is a single relaxed load.
+    let initial_period = heartbeat_period_ms();
+    LAST_HEARTBEAT_PERIOD_MS.store(initial_period, Ordering::Relaxed);
+    let mut heartbeat = Ticker::every(Duration::from_millis(initial_period as u64));
 
     loop {
         // Race the heartbeat tick against the next received frame.
-        // If a frame arrives, process it (NMT or, post-Phase 2,
-        // SDO). If the tick fires first, send a heartbeat frame.
+        // If a frame arrives, process it (NMT or SDO). If the
+        // tick fires first, send a heartbeat frame.
         let rx_fut = can.read();
         let tick_fut = heartbeat.next();
         match select(rx_fut, tick_fut).await {
             Either::First(Ok(envelope)) => {
                 let frame = envelope.frame;
                 // CANopen uses 11-bit standard IDs exclusively.
-                // Extended IDs are silently dropped in Phase 1.
+                // Extended IDs are silently dropped.
                 let id_u16: u16 = match frame.header().id() {
                     embedded_can::Id::Standard(s) => s.as_raw(),
                     embedded_can::Id::Extended(_) => 0xFFFF, // sentinel: never matches
@@ -177,10 +188,25 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                             }
                         }
                     }
+                } else if is_sdo_request(&frame) {
+                    // SDO server: parse + dispatch + send response.
+                    // The response may be a 0x60 success, a 0x4_
+                    // upload with the OD value, or a 0x80 abort.
+                    let data: [u8; 8] = {
+                        let mut buf = [0u8; 8];
+                        let len = frame.header().len() as usize;
+                        let src = frame.data();
+                        buf[..len].copy_from_slice(&src[..len]);
+                        buf
+                    };
+                    if let Some(response) = sdo::dispatch(&data) {
+                        if let Some(_dropped) = can.write(&response).await {
+                            warn!("CANopen: SDO response replaced a pending frame");
+                        }
+                    }
                 }
-                // Non-NMT frames are silently dropped in Phase 1
-                // (no SDO server yet). Phase 2 will dispatch them
-                // to the SDO handler.
+                // Other COB-IDs (PDO reserved, SYNC, EMCY, ...) are
+                // silently dropped in Phase 2.
             }
             Either::First(Err(_e)) => {
                 // Bus error (e.g. controller entered error-passive).
@@ -190,6 +216,16 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
             Either::Second(()) => {
                 if let Some(_dropped) = can.write(&build_heartbeat_frame(state)).await {
                     warn!("CANopen: heartbeat frame replaced a pending frame");
+                }
+                // Reflect a runtime change of 0x1017.0: if the
+                // heartbeat period was updated via SDO, restart
+                // the ticker so the next tick honours the new
+                // period. We use a static mutable cache to detect
+                // the change without re-allocating on every tick.
+                let current = heartbeat_period_ms();
+                if current != LAST_HEARTBEAT_PERIOD_MS.load(Ordering::Relaxed) {
+                    LAST_HEARTBEAT_PERIOD_MS.store(current, Ordering::Relaxed);
+                    heartbeat = Ticker::every(Duration::from_millis(current as u64));
                 }
             }
         }
