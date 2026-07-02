@@ -74,9 +74,13 @@ pub fn read(index: u16, sub: u8) -> Result<OdValue, SdoAbort> {
         (0x1018, 2) => Ok(OdValue::u32(0x0000_00B0)), // ProductCode (B-G431B-ESC1)
         (0x1018, 3) => Ok(OdValue::u32(0x0000_0001)), // Revision
         (0x1018, 4) => Ok(OdValue::u32(0x0000_0000)), // Serial (TODO: 96-bit UDID)
+        // Vendor: UDS gateway. Read returns the last UDS response
+        // (the master does SDO write then SDO read to do a UDS
+        // call; see `super::uds`).
+        (0x2F00, 0) => Ok(super::uds::load_response()),
         // Subindex out of range for 0x1018
         (0x1018, n) if n > 4 => Err(SdoAbort::NoSubindex),
-        // No vendor entries in Phase 2.
+        // No more vendor entries in Phase 3.
         _ => Err(SdoAbort::NotExist),
     }
 }
@@ -95,6 +99,20 @@ pub fn write(index: u16, sub: u8, value: OdValue) -> Result<(), SdoAbort> {
             } else {
                 Err(SdoAbort::LengthMismatch)
             }
+        }
+        // Vendor: UDS gateway. Write dispatches the payload as a
+        // UDS request; the response is stashed for the next SDO
+        // read on this index.
+        (0x2F00, 0) => {
+            // The SDO write hands us an `OdValue` whose low
+            // `size` bytes are the UDS request payload. Re-pack
+            // into a slice and dispatch.
+            let mut bytes = [0u8; 4];
+            for i in 0..(value.size as usize).min(4) {
+                bytes[i] = ((value.bits >> (8 * i)) & 0xFF) as u8;
+            }
+            super::uds::dispatch(&bytes[..value.size as usize]);
+            Ok(())
         }
         // RO: everything else in v1.
         (0x1000, _) | (0x1001, _) | (0x1018, _) => Err(SdoAbort::ReadOnly),

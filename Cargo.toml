@@ -32,6 +32,11 @@ defmt = "1"
 defmt-rtt = "1"
 
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+# `critical-section` is the trait crate; the single-core impl
+# is provided by `cortex-m`'s `critical-section-single-core`
+# feature above (the two features share the same name, but
+# they're on different crates and have different semantics).
+critical-section = "1.1"
 cortex-m-rt = "0.7"
 panic-probe = { version = "1", features = ["print-defmt"] }
 

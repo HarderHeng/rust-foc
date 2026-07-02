@@ -22,6 +22,7 @@
 pub mod canopen;
 pub mod od;
 pub mod sdo;
+pub mod uds;
 
 use defmt::info;
 use embassy_stm32::{
