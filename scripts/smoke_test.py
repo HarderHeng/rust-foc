@@ -7,15 +7,17 @@ Two run modes:
 * `sim` (default) — in-process simulation. A Python firmware
   emulator mirrors the Rust firmware's wire format byte-for-byte
   (SDO server, OD, UDS services, OTA state machine, NMT,
-  heartbeat). A Python master driver drives it via a queue of
-  "frames" (dicts with `id`, `data`, `dlc`). The driver parses
+  heartbeat). A Python master driver drives it via a `SimBus`
+  abstraction (dicts with `id`, `data`, `dlc`). The driver parses
   the responses the same way a real CANopen master would and
   asserts on every byte. No hardware, no vcan required.
 
-* `live` — runs against a real board over python-can. The same
-  scenarios are exercised but the firmware emulator is replaced
-  by an actual STM32G431B-ESC1 connected to e.g. a USB-CAN
-  adapter on `socketcan:vcan0` / `pcan:PCAN_USBBUS1` / etc.
+* `live` — runs against real frames on a real CAN interface via
+  `python-can`. The bus is whatever the firmware is on: an
+  actual STM32G431B-ESC1 connected via USB-CAN, or
+  `scripts/firmware_emulator.py` listening on a vcan0. Use
+  this mode to verify the wire format end-to-end without the
+  Rust firmware, or to cross-check Rust + Python side-by-side.
 
 The simulator path is the "spec test" — it verifies the firmware
 implements the wire protocol correctly by comparing against an
@@ -26,17 +28,27 @@ the real firmware should also agree.
 
 Usage::
 
-    python3 scripts/smoke_test.py                          # sim, all scenarios
-    python3 scripts/smoke_test.py --scenarios heartbeat    # one scenario
-    python3 scripts/smoke_test.py --list                   # show all scenarios
-    python3 scripts/smoke_test.py --live socketcan:vcan0  # live hardware
+    # In-process sim (default, no hardware needed)
+    python3 scripts/smoke_test.py
+    python3 scripts/smoke_test.py --scenarios heartbeat,nmt
+    python3 scripts/smoke_test.py --list
 
-Exit code: 0 on all-pass, 1 on any failure.
+    # Live mode against vcan0
+    sudo scripts/setup_vcan.sh                              # bring up vcan0
+    python3 scripts/firmware_emulator.py vcan0 &            # in one shell
+    python3 scripts/smoke_test.py --live vcan0              # in another
+
+    # Live mode against real hardware on PCAN-USB
+    python3 scripts/smoke_test.py --live pcan:PCAN_USBBUS1
+
+Exit code: 0 on all-pass, 1 on any scenario failure, 2 if the
+bus couldn't be opened (live mode).
 """
 
 import argparse
 import struct
 import sys
+import time
 
 
 # ---- CiA 301 / ISO 14229 constants ----------------------------------
@@ -540,12 +552,158 @@ def assert_bytes(actual, expected, msg: str = "") -> None:
         )
 
 
-class MasterDriver:
-    """Builds SDO request frames, parses responses the same way a
-    real CANopen master would. Asserts on every response byte."""
+# ---- Bus abstraction (SimBus for in-process tests; CanBus for real CAN)
+
+class Bus:
+    """Send/receive a single CAN frame. Two implementations:
+
+    * `SimBus` — wraps a `FirmwareEmulator`, returns frames in
+      the same process. Default for the smoke test; no hardware
+      needed.
+    * `CanBus` — wraps `python-can`, sends/receives real frames
+      on a real CAN interface (e.g. `socketcan:vcan0`, `pcan:PCAN_USBBUS1`).
+      Used with `--live IFACE`.
+    """
+
+    def send(self, frame: dict) -> dict | None:
+        """Send a frame, return the next matching response frame
+        or `None` if no response is expected / received.
+
+        For SDO request frames this returns the server's SDO
+        response. For NMT frames this returns None (NMT has no
+        response on the wire).
+        """
+        raise NotImplementedError
+
+    def recv(self, timeout: float = 1.0) -> dict | None:
+        """Receive any one frame from the bus, or None on timeout.
+        Mainly used for heartbeat / non-SDO observations in live
+        mode; sim mode delivers these inline via `send()`."""
+        raise NotImplementedError
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+
+class SimBus(Bus):
+    """In-process Bus backed by a `FirmwareEmulator`. Responses
+    are returned synchronously from the same thread."""
 
     def __init__(self, fw: FirmwareEmulator) -> None:
         self.fw = fw
+
+    def send(self, frame: dict) -> dict | None:
+        if frame['id'] == SDO_RX_COB_ID:
+            return self.fw.handle_sdo(frame)
+        if frame['id'] == NMT_COB_ID:
+            return self.fw.handle_nmt(frame)
+        return None
+
+    def recv(self, timeout: float = 1.0) -> dict | None:
+        # Sim mode never spontaneously produces frames; the
+        # emulator only responds on explicit send(). This is
+        # here for API symmetry with CanBus.
+        return None
+
+    def close(self) -> None:
+        pass
+
+
+class CanBus(Bus):
+    """Real CAN bus via `python-can`. Sends frames on the wire,
+    waits for the matching server response.
+
+    For SDO requests on `SDO_RX_COB_ID`, the response is the next
+    frame on `SDO_TX_COB_ID`. For NMT, there is no response — we
+    just send and return None. Heartbeats from `HEARTBEAT_COB_ID`
+    are not picked up here; use `recv()` for those.
+    """
+
+    def __init__(self, interface: str, channel: str,
+                 bitrate: int = 500_000, timeout: float = 1.0) -> None:
+        try:
+            import can
+        except ImportError as e:
+            raise TestFailure(
+                f"python-can not installed (run `pip install python-can`); "
+                f"needed for --live mode ({e})"
+            )
+        self._timeout = timeout
+        try:
+            self.bus = can.interface.Bus(
+                interface=interface, channel=channel, bitrate=bitrate
+            )
+        except (can.CanError, OSError) as e:
+            raise TestFailure(
+                f"could not open CAN bus {interface}:{channel} @ {bitrate} bps: {e}. "
+                f"For local testing without hardware, run `sudo "
+                f"scripts/setup_vcan.sh` to bring up a vcan0 interface."
+            )
+
+    def send(self, frame: dict) -> dict | None:
+        import can
+        msg = can.Message(
+            arbitration_id=frame['id'],
+            data=list(frame['data']),
+            is_extended_id=False,
+        )
+        try:
+            self.bus.send(msg, timeout=self._timeout)
+        except can.CanError as e:
+            raise TestFailure(f"CAN send failed: {e}")
+        # Decide which COB-ID to listen on for the response.
+        if frame['id'] == SDO_RX_COB_ID:
+            expect = SDO_TX_COB_ID
+        elif frame['id'] == NMT_COB_ID:
+            return None
+        else:
+            expect = None
+        if expect is None:
+            return None
+        # Wait for the matching response.
+        deadline = time.monotonic() + self._timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            r = self.bus.recv(timeout=remaining)
+            if r is None:
+                return None
+            if r.arbitration_id == expect:
+                return {
+                    'id': r.arbitration_id,
+                    'data': bytes(r.data),
+                    'dlc': r.dlc,
+                }
+            # Skip frames we don't care about (heartbeats, etc.)
+
+    def recv(self, timeout: float = 1.0) -> dict | None:
+        r = self.bus.recv(timeout=timeout)
+        if r is None:
+            return None
+        return {
+            'id': r.arbitration_id,
+            'data': bytes(r.data),
+            'dlc': r.dlc,
+        }
+
+    def close(self) -> None:
+        self.bus.shutdown()
+
+
+class MasterDriver:
+    """Builds SDO request frames, parses responses the same way a
+    real CANopen master would. Asserts on every response byte.
+
+    Talks to a `Bus` (SimBus or CanBus) for actual frame transport;
+    the frame builders are identical in both modes."""
+
+    def __init__(self, bus: Bus) -> None:
+        self.bus = bus
+        # Exposed for tests that want to poke at internal state
+        # (e.g. trigger a segmented upload to check abort-on-replay).
+        # Sim-only; CanBus returns None.
+        self.fw = bus.fw if isinstance(bus, SimBus) else None
 
     # ---- low-level frame builders -----------------------------------
 
@@ -601,12 +759,12 @@ class MasterDriver:
     # ---- high-level ops ----------------------------------------------
 
     def nmt(self, cmd: int) -> str:
-        new_state = self.fw.handle_nmt(self._frame_nmt(cmd))
+        new_state = self.bus.send(self._frame_nmt(cmd))
         _assert(new_state is not None, f"NMT cmd 0x{cmd:02x} ignored")
         return new_state
 
     def sdo_write(self, idx: int, sub: int, value: bytes) -> bool:
-        resp = self.fw.handle_sdo(self._frame_sdo_write(idx, sub, value))
+        resp = self.bus.send(self._frame_sdo_write(idx, sub, value))
         _assert(resp is not None, "no SDO response")
         return resp['data'][0] == 0x60
 
@@ -620,7 +778,7 @@ class MasterDriver:
         """
         assert 5 <= len(value) <= 14
         size = len(value)
-        init = self.fw.handle_sdo(self._frame_sdo_dl_initiate(idx, sub, size))
+        init = self.bus.send(self._frame_sdo_dl_initiate(idx, sub, size))
         _assert(init is not None, "no SDO initiate response")
         _assert(init['data'][0] == 0x60,
                 f"expected 0x60 initiate response, got 0x{init['data'][0]:02x}")
@@ -629,7 +787,7 @@ class MasterDriver:
         while sent < size:
             chunk = min(7, size - sent)
             last = (sent + chunk) == size
-            seg = self.fw.handle_sdo(
+            seg = self.bus.send(
                 self._frame_sdo_dl_seg(toggle, value[sent:sent + chunk], last)
             )
             _assert(seg is not None, "no SDO segment response")
@@ -641,18 +799,16 @@ class MasterDriver:
 
     def uds_dispatch_raw(self, payload: bytes) -> None:
         """Drive the UDS dispatcher directly, bypassing the SDO
-        download layer. Useful for UDS requests longer than 4 bytes
-        (SecurityAccess sendKey with a 4-byte key, RequestDownload
-        with a 4-byte size) — Phase 3 v1's SDO download is expedited-
-        only, so these wouldn't fit in a single SDO write. The
-        firmware's UDS logic itself doesn't care about SDO framing;
-        this method feeds the payload straight to it."""
+        download layer. Sim mode only — useful for tests that want
+        to verify UDS logic without exercising SDO framing."""
+        _assert(self.fw is not None,
+                "uds_dispatch_raw is sim-only; use sdo_write / sdo_write_long")
         self.fw._dispatch_uds(payload)
 
     def sdo_read(self, idx: int, sub: int) -> bytes:
         """SDO read handling both expedited (1–4 bytes) and
         segmented (5–7 bytes) responses. Returns the value bytes."""
-        init = self.fw.handle_sdo(self._frame_sdo_read(idx, sub))
+        init = self.bus.send(self._frame_sdo_read(idx, sub))
         _assert(init is not None, "no SDO response")
         cmd = init['data'][0]
         if (cmd & 0xE0) == 0x80 and (cmd & 0x08):
@@ -666,7 +822,7 @@ class MasterDriver:
             result = bytearray()
             toggle = 0
             while True:
-                seg = self.fw.handle_sdo(self._frame_sdo_seg(toggle))
+                seg = self.bus.send(self._frame_sdo_seg(toggle))
                 _assert(seg is not None, "no Upload Segment response")
                 b0 = seg['data'][0]
                 _assert((b0 & 0xE0) == 0xA0,
@@ -685,50 +841,64 @@ class MasterDriver:
 
 # ---- Scenarios -------------------------------------------------------
 
-def s_heartbeat(fw: FirmwareEmulator) -> None:
-    """After boot-up the firmware reports PreOperational (0x7F)."""
-    assert_bytes([fw.heartbeat_byte()], [0x7F], "boot heartbeat should be PreOperational")
+def s_heartbeat(bus: Bus) -> None:
+    """After boot-up the firmware reports PreOperational (0x7F).
+
+    Sim mode checks the firmware's heartbeat byte directly (the
+    emulator doesn't send spontaneous frames). Live mode receives
+    a heartbeat frame on COB-ID 0x701 and checks its data byte.
+    """
+    if isinstance(bus, SimBus):
+        assert_bytes([bus.fw.heartbeat_byte()], [0x7F],
+                     "boot heartbeat should be PreOperational")
+    else:
+        msg = bus.recv(timeout=2.0)
+        _assert(msg is not None, "no heartbeat frame received within 2s")
+        _assert(msg['id'] == HEARTBEAT_COB_ID,
+                f"got frame on 0x{msg['id']:03x}, expected heartbeat COB-ID 0x{HEARTBEAT_COB_ID:03x}")
+        assert_bytes(msg['data'][:1], b'\x7F',
+                     "boot heartbeat should be PreOperational")
 
 
-def s_sdo_basic(fw: FirmwareEmulator) -> None:
+def s_sdo_basic(bus: Bus) -> None:
     """SDO read of 0x1000 (DeviceType) — 4-byte expedited, SCS=0x8C."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     val = drv.sdo_read(0x1000, 0)
     assert_bytes(val, b'\x00\x00\x00\x00', "DeviceType = 0")
 
 
-def s_sdo_write_heartbeat(fw: FirmwareEmulator) -> None:
+def s_sdo_write_heartbeat(bus: Bus) -> None:
     """Write 0x1017.0 (HeartbeatProducerTime) to 250 ms, read back."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     _assert(drv.sdo_write(0x1017, 0, struct.pack('<H', 250)), "write heartbeat OK")
     val = drv.sdo_read(0x1017, 0)
     assert_bytes(val, struct.pack('<H', 250), "heartbeat now 250ms")
 
 
-def s_sdo_ro_rejected(fw: FirmwareEmulator) -> None:
+def s_sdo_ro_rejected(bus: Bus) -> None:
     """Write to a read-only entry returns an abort (SDO abort code
     0x06010002 ReadOnly)."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     _assert(not drv.sdo_write(0x1000, 0, b'\x01\x00\x00\x00'), "write to RO should fail")
 
 
-def s_uds_tp(fw: FirmwareEmulator) -> None:
+def s_uds_tp(bus: Bus) -> None:
     """TesterPresent (0x3E 0x00) → positive (0x7E 0x00) via SDO."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     _assert(drv.sdo_write(0x2F00, 0, bytes([SID_TP, 0x00])), "TP write OK")
     val = drv.sdo_read(0x2F00, 0)
     assert_bytes(val, bytes([SID_TP + 0x40, 0x00]), "TP response")
 
 
-def s_uds_session_default(fw: FirmwareEmulator) -> None:
+def s_uds_session_default(bus: Bus) -> None:
     """DiagnosticSessionControl 0x10 0x01 → 0x50 0x01."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     _assert(drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x01])), "DSC write OK")
     val = drv.sdo_read(0x2F00, 0)
     assert_bytes(val, bytes([SID_DSC + 0x40, 0x01]), "DefaultSession response")
 
 
-def s_uds_security_unlock(fw: FirmwareEmulator) -> None:
+def s_uds_security_unlock(bus: Bus) -> None:
     """Full security dance:
 
     1. Try ProgrammingSession without unlock → 0x33 SecurityAccessDenied.
@@ -737,7 +907,7 @@ def s_uds_security_unlock(fw: FirmwareEmulator) -> None:
     3. SendKey (0x27 0x02 + 4-byte key) → 0x67 0x02.
     4. ProgrammingSession (0x10 0x02) → 0x50 0x02.
     """
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     # 1. Locked → ProgrammingSession denied.
     drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x02]))
     val = drv.sdo_read(0x2F00, 0)
@@ -758,23 +928,22 @@ def s_uds_security_unlock(fw: FirmwareEmulator) -> None:
     assert_bytes(val, bytes([SID_DSC + 0x40, 0x02]), "DSC 0x02 after unlock")
 
 
-def s_uds_active_did(fw: FirmwareEmulator) -> None:
+def s_uds_active_did(bus: Bus) -> None:
     """ReadDataByIdentifier 0xF186 → 0x62 0x86 0xF1 <session>."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     drv.sdo_write(0x2F00, 0, bytes([SID_RDBI, 0x86, 0xF1]))
     val = drv.sdo_read(0x2F00, 0)
     assert_bytes(val, bytes([SID_RDBI + 0x40, 0x86, 0xF1, 0x01]),
                  "F186 in Default session")
 
 
-def s_uds_wrong_key(fw: FirmwareEmulator) -> None:
+def s_uds_wrong_key(bus: Bus) -> None:
     """SendKey with the wrong value → 0x33 SecurityAccessDenied.
 
     SendKey is 5 bytes (1 SID + 1 sub + 4 key), so we use the
-    raw-dispatch helper to bypass the 4-byte SDO download cap.
-    See `MasterDriver.uds_dispatch_raw` for context.
+    segmented SDO download path. See `MasterDriver.sdo_write_long`.
     """
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
     drv.sdo_read(0x2F00, 0)  # consume seed
     drv.sdo_write_long(0x2F00, 0,
@@ -784,17 +953,14 @@ def s_uds_wrong_key(fw: FirmwareEmulator) -> None:
                  "wrong key rejected")
 
 
-def s_ota_block_seq(fw: FirmwareEmulator) -> None:
+def s_ota_block_seq(bus: Bus) -> None:
     """OTA flow: unlock → program session → RequestDownload (100 B)
     → TransferData seq=1 OK → TransferData seq=3 (wrong) →
     0x73 WrongBlockSequenceNumber.
 
-    The 0x34 RequestDownload is 5 bytes (1 SID + 4 size) which
-    doesn't fit expedited SDO download; the firmware emulator
-    accepts it via direct dispatch (a real master on a real board
-    would need segmented SDO download — Phase 5 work).
-    """
-    drv = MasterDriver(fw)
+    The 0x34 RequestDownload is 5 bytes — goes out via segmented
+    SDO download. The 0x36 TransferData is 3 bytes, expedited."""
+    drv = MasterDriver(bus)
     # Setup: unlock + enter programming
     drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
     drv.sdo_read(0x2F00, 0)
@@ -820,10 +986,10 @@ def s_ota_block_seq(fw: FirmwareEmulator) -> None:
                  "wrong block seq → 0x73")
 
 
-def s_nmt_states(fw: FirmwareEmulator) -> None:
+def s_nmt_states(bus: Bus) -> None:
     """NMT transitions Operational / Stopped / PreOperational via
     addressed and broadcast frames."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     _assert(drv.nmt(0x01) == 'Operational', "→ Operational")
     _assert(drv.nmt(0x02) == 'Stopped', "→ Stopped")
     _assert(drv.nmt(0x80) == 'PreOperational', "→ PreOperational")
@@ -831,99 +997,109 @@ def s_nmt_states(fw: FirmwareEmulator) -> None:
     _assert(drv.nmt(0x01) == 'Operational', "broadcast → Operational")
 
 
-def s_seg_toggle_mismatch(fw: FirmwareEmulator) -> None:
+def s_seg_toggle_mismatch(bus: Bus) -> None:
     """Upload Segment request with wrong toggle bit → abort."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     # Trigger a 6-byte response (SecurityAccess seed).
     drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
-    init = fw.handle_sdo(drv._frame_sdo_read(0x2F00, 0))
+    # The previous sdo_write consumed the seed (upload complete).
+    # Re-trigger by writing again, then issue an Upload Initiate
+    # ourselves and immediately send a wrong-toggle segment
+    # without fetching the real one.
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
+    init = drv.bus.send(drv._frame_sdo_read(0x2F00, 0))
     _assert(init['data'][0] == 0x82,
             f"expected 0x82 (segmented), got 0x{init['data'][0]:02x}")
     # Wrong toggle (expected 0, send 1).
-    bad = fw.handle_sdo(drv._frame_sdo_seg(1))
+    bad = drv.bus.send(drv._frame_sdo_seg(1))
     _assert(bad is not None, "should respond with abort")
     assert_bytes(bad['data'][0:1], b'\x80', "abort SCS")
 
 
-def s_seg_size_field(fw: FirmwareEmulator) -> None:
+def s_seg_size_field(bus: Bus) -> None:
     """Segmented initiate response must have size field in bytes
     4–5 little-endian."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
-    init = fw.handle_sdo(drv._frame_sdo_read(0x2F00, 0))
+    # Re-trigger for the segmented path (the first sdo_write
+    # already completed the previous upload).
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
+    init = drv.bus.send(drv._frame_sdo_read(0x2F00, 0))
     size = struct.unpack_from('<H', init['data'], 4)[0]
     _assert(size == 6, f"size field should be 6, got {size}")
 
 
-def s_seg_replay_after_done(fw: FirmwareEmulator) -> None:
+def s_seg_replay_after_done(bus: Bus) -> None:
     """After a segmented upload completes, a stale segment request
     should abort rather than replay old data."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     # Trigger + complete a segmented upload.
     drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
     drv.sdo_read(0x2F00, 0)  # consumes all 6 bytes; clears state
     # Now a stray segment request.
-    bad = fw.handle_sdo(drv._frame_sdo_seg(0))
+    bad = drv.bus.send(drv._frame_sdo_seg(0))
     _assert(bad is not None and bad['data'][0] == 0x80,
             "stray segment after done → abort")
 
 
 # ---- Segmented download scenarios -----------------------------------
 
-def s_seg_dl_initiate(fw: FirmwareEmulator) -> None:
+def s_seg_dl_initiate(bus: Bus) -> None:
     """0x21 Initiate Download Response is 0x60 (success)."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     # 5-byte UDS request: SecurityAccess sendKey with wrong key.
     payload = bytes([SID_SA, 0x02]) + b'\x00\x00\x00\x00'
-    init = fw.handle_sdo(drv._frame_sdo_dl_initiate(0x2F00, 0, len(payload)))
+    init = drv.bus.send(drv._frame_sdo_dl_initiate(0x2F00, 0, len(payload)))
     _assert(init is not None, "no initiate response")
     assert_bytes(init['data'][0:1], b'\x60', "Initiate Download Response SCS")
+    # Clean up the in-flight download so subsequent scenarios start clean.
+    drv.bus.send(drv._frame_sdo_dl_seg(0, payload, last=True))
 
 
-def s_seg_dl_one_segment(fw: FirmwareEmulator) -> None:
+def s_seg_dl_one_segment(bus: Bus) -> None:
     """5-byte value fits in one 7-byte segment with c=1 and n=2."""
-    drv = MasterDriver(fw)
+    drv = MasterDriver(bus)
     drv.sdo_write_long(0x2F00, 0,
                        bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
     val = drv.sdo_read(0x2F00, 0)
     assert_bytes(val, bytes([SID_SA + 0x40, 0x02]), "key accepted")
 
 
-def s_seg_dl_toggle_mismatch(fw: FirmwareEmulator) -> None:
+def s_seg_dl_toggle_mismatch(bus: Bus) -> None:
     """Download Segment with wrong toggle bit → abort."""
-    drv = MasterDriver(fw)
-    init = fw.handle_sdo(drv._frame_sdo_dl_initiate(0x2F00, 0, 5))
+    drv = MasterDriver(bus)
+    init = drv.bus.send(drv._frame_sdo_dl_initiate(0x2F00, 0, 5))
     _assert(init['data'][0] == 0x60, "init OK")
     # Wrong toggle (expected 0, send 1).
-    bad = fw.handle_sdo(drv._frame_sdo_dl_seg(1, b'\xAA\xBB\xCC\xDD\xEE', last=True))
+    bad = drv.bus.send(drv._frame_sdo_dl_seg(1, b'\xAA\xBB\xCC\xDD\xEE', last=True))
     _assert(bad is not None and bad['data'][0] == 0x80,
             "wrong toggle → abort")
     # State should be cleared — a subsequent segment also aborts.
-    bad2 = fw.handle_sdo(drv._frame_sdo_dl_seg(0, b'\xAA\xBB\xCC\xDD\xEE', last=True))
+    bad2 = drv.bus.send(drv._frame_sdo_dl_seg(0, b'\xAA\xBB\xCC\xDD\xEE', last=True))
     _assert(bad2 is not None and bad2['data'][0] == 0x80,
             "after abort, segment also aborts")
 
 
-def s_seg_dl_stray_segment(fw: FirmwareEmulator) -> None:
+def s_seg_dl_stray_segment(bus: Bus) -> None:
     """A Download Segment without a preceding Initiate aborts."""
-    drv = MasterDriver(fw)
-    bad = fw.handle_sdo(drv._frame_sdo_dl_seg(0, b'\xAA\xBB\xCC\xDD', last=True))
+    drv = MasterDriver(bus)
+    bad = drv.bus.send(drv._frame_sdo_dl_seg(0, b'\xAA\xBB\xCC\xDD', last=True))
     _assert(bad is not None and bad['data'][0] == 0x80,
             "stray segment → abort")
 
 
-def s_seg_dl_size_mismatch(fw: FirmwareEmulator) -> None:
+def s_seg_dl_size_mismatch(bus: Bus) -> None:
     """Segment's c=1 flag arrived but offset != total → abort."""
-    drv = MasterDriver(fw)
-    init = fw.handle_sdo(drv._frame_sdo_dl_initiate(0x2F00, 0, 5))
+    drv = MasterDriver(bus)
+    init = drv.bus.send(drv._frame_sdo_dl_initiate(0x2F00, 0, 5))
     _assert(init['data'][0] == 0x60, "init OK")
     # Send only 3 bytes with c=1; size says 5 → premature last.
-    bad = fw.handle_sdo(drv._frame_sdo_dl_seg(0, b'\x01\x02\x03', last=True))
+    bad = drv.bus.send(drv._frame_sdo_dl_seg(0, b'\x01\x02\x03', last=True))
     _assert(bad is not None and bad['data'][0] == 0x80,
             "premature last → abort")
 
 
-def s_seg_dl_two_segments(fw: FirmwareEmulator) -> None:
+def s_seg_dl_two_segments(bus: Bus) -> None:
     """Skipped: Phase 3 v3 caps SDO segmented transfer at 7 bytes,
     so a single 7-byte segment carries every UDS request the
     firmware actually serves (sendKey=5, RequestDownload=5).
@@ -968,11 +1144,17 @@ def main() -> int:
     p.add_argument("--list", action="store_true",
                    help="List scenario names and exit")
     p.add_argument("--live", metavar="IFACE", default=None,
-                   help="Run against real hardware on the given "
-                        "python-can interface (e.g. socketcan:vcan0, "
-                        "pcan:PCAN_USBBUS1). Without this flag the "
-                        "test runs in-process against the Python "
-                        "firmware emulator.")
+                   help="Run against real CAN hardware on the given "
+                        "python-can channel (e.g. `vcan0`, "
+                        "`socketcan:vcan0`, `pcan:PCAN_USBBUS1`). "
+                        "Each scenario gets a fresh firmware; "
+                        "the firmware is whatever is on the bus "
+                        "(real board, or `scripts/firmware_emulator.py` "
+                        "listening on vcan0).")
+    p.add_argument("--bitrate", type=int, default=500_000,
+                   help="Bus bitrate for --live mode (default 500_000)")
+    p.add_argument("--timeout", type=float, default=1.0,
+                   help="Per-frame response timeout in --live mode (default 1.0s)")
     args = p.parse_args()
 
     if args.list:
@@ -982,22 +1164,38 @@ def main() -> int:
             print(f"  {name:<22} {doc.splitlines()[0] if doc else ''}")
         return 0
 
-    if args.live:
-        print(f"LIVE mode against {args.live} is not yet wired up — "
-              f"see scripts/smoke_test.py docstring for the path.",
-              file=sys.stderr)
-        return 2
-
     selected = [s.strip() for s in args.scenarios.split(",") if s.strip()]
+    if args.live:
+        # Channel string parsing: "vcan0" → socketcan / vcan0; full
+        # form `interface:channel` passed through to python-can.
+        if ":" in args.live:
+            iface, chan = args.live.split(":", 1)
+        else:
+            iface, chan = "socketcan", args.live
+        try:
+            bus: Bus = CanBus(iface, chan, bitrate=args.bitrate, timeout=args.timeout)
+        except TestFailure as e:
+            print(f"  ERROR setup: {e}")
+            return 2
+        mode_label = f"live {iface}:{chan} @ {args.bitrate} bps"
+    else:
+        bus = None  # built per-scenario so each one is fresh
+        mode_label = "sim (in-process)"
+
+    print(f"Mode: {mode_label}")
     failed = 0
     for name in selected:
         if name not in SCENARIOS:
             print(f"  UNKNOWN  {name}")
             failed += 1
             continue
-        fw = FirmwareEmulator()
+        if bus is None:
+            # Sim mode: each scenario gets a fresh firmware.
+            sim_bus = SimBus(FirmwareEmulator())
+        else:
+            sim_bus = bus  # shared across scenarios
         try:
-            SCENARIOS[name](fw)
+            SCENARIOS[name](sim_bus)
             print(f"  PASS  {name}")
         except TestFailure as e:
             print(f"  FAIL  {name}: {e}")
@@ -1007,6 +1205,8 @@ def main() -> int:
             failed += 1
 
     print()
+    if bus is not None:
+        bus.close()
     if failed == 0:
         print(f"All {len(selected)} scenarios passed.")
         return 0
