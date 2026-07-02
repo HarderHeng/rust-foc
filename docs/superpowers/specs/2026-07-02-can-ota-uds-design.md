@@ -335,16 +335,76 @@ SDO 是 indexing access 协议,client(slave 在我们的角色配置下) 读/写
 
 ---
 
-## 8. 关键决策点(请你拍板)
+## 8. 关键决策点(已确认 2026-07-02)
 
-| # | 决策 | 我的推荐 | 替代 |
+| # | 决策 | 选定 | 含义 |
 |---|---|---|---|
-| 1 | bootloader 存根 | B: 4 KB stub,单 bank in-place 写 | A: 无 stub; C: 8 KB stub 做 swap |
-| 2 | CANopen v1 | NMT + SDO + heartbeat;无 PDO/SYNC/EMCY | 加 TPDO; 加 SYNC |
-| 3 | UDS v1 | session/DID/RW/TesterPresent/clear/reset/SecurityAccess | 加 RoutineControl |
-| 4 | UDS transport | 独立 COB-ID + ISO-TP(v1 只 SF) | 走 CANopen SDO |
+| 1 | bootloader 存根 | **B: 完全干掉** | app 从 `0x0800_0000` 起,占满 ~124 KB;OTA 单 bank in-place 写;下载中掉电 brick 风险由 UDS 协议层 range-check 缓解 |
+| 2 | CANopen v1 | **A: NMT + SDO + heartbeat** | 无 PDO/SYNC/EMCY;NodeId 1 hardcode |
+| 3 | UDS v1 | **A: session/DID/RW/TesterPresent/SecurityAccess** | SF only;Transfer 服务 Phase 4 加 |
+| 4 | UDS transport | **B: 作为 CANopen 扩展诊断业务** | 不独立 COB-ID + 不独立 ISO-TP;UDS 走 SDO |
 
-**如果这 4 个都同意,我开始 Phase 1。** 有不同意的,告诉我用哪一栏,或者说你想加什么 / 删什么。
+### 决策 1 详细:单 bank in-place 写的安全分析
+
+128 KB flash 全部给 app。OTA 下载时:
+- Master 按 4 KB block 发
+- App 把每个 block 写到 flash 目标地址(从低地址往高地址写)
+- **当前 PC 必须不在被写的 block 里**:这要求 UDS handler 的代码和数据段在 **OTA 期间位于 flash 的最高地址段**(最后 4 KB),且 block 写顺序是**严格升序**
+- 写完最后一个 block(新 UDS handler 所在的最高地址)之前,不能触发 reset
+- 最后一个 block 写完后立即 trigger NVIC system reset,新 image 启动
+- **风险**:最后一个 block 写完后到 reset 完成之间掉电(典型 1-10 ms)。如果此时正在写的 page 状态未知,启动可能执行坏 image
+- **缓解**:写完最后 block 后立即**写 OTA flag**(`0x0801_F000 = 0xAA`),然后**只检查 flag 完整性**就 reset;UDS handler 的 `init` 检查"如果 flag == 0xAA 且当前 image CRC 不匹配 → 跳到一个"factory reset"地址(0x0800_0000,旧 image 仍在那里因为我们没动低地址 — 哦等等,新 image 写了整个 flash,包括低地址,所以 factory reset 没意义)
+
+**实际风险**:最后 block 写到 0x0801_F000 附近时如果掉电,新 image 缺失,旧 image 也被破坏,无法启动。**这是单 bank 的固有问题**,任何方案都无法消除,只能降低概率:
+- 写最后 block 之前先写 OTA flag
+- boot 时如果 flag == 0xAA 且 image CRC 失败,**不要跳到 0x0800_0000**,而是 **stay in bootloader stub 或 fail-safe 模式**
+- 但没有 bootloader stub(B 方案),所以 fail-safe 没办法
+
+**结论**:B 方案下,如果最后 1% 的 OTA 阶段掉电,brick。生产用需要 B + 物理开关恢复 / 外部 programmer。开发 / 实验室可接受。
+
+**安全补充(实施时注意)**:
+- 写顺序严格升序,新 UDS handler 放在最后 4 KB
+- 写每个 block 前都做 range check 拒绝 `< 0x0800_1000`(避免 master 误擦 bootloader 区)— 哦等等,**没有 bootloader 区了**,所以 range check 改为 `>= 0x0800_0000 && < 0x0801_F000`
+- 最后写 OTA flag,在 metadata 区(`0x0801_F000`)
+- 写完 flag 后等一个短 delay(~10ms)确保 flash 完成,再 trigger reset
+
+### 决策 4 详细:UDS 作为 CANopen 扩展诊断业务
+
+**Wire format: UDS 走 CANopen SDO,作为 vendor-specific object。**
+
+**Object dictionary entry:**
+
+| Index | Sub | Name | Type | Access | 含义 |
+|---|---|---|---|---|---|
+| `0x2F00` | `0` | UDS gateway | u8[7] | RW | 一个 SDO 读写 = 一次 UDS 服务调用 |
+
+**用法(Master 视角):**
+- 想发 `UDS ReadDID(0xF190)`:写 SDO 0x600+NodeId, 写数据 `[0x22, 0xF1, 0x90]`,读到 0x580+NodeId 的数据 `[0x62, 0xF1, 0x90, value...]`
+- 想发 `UDS ECUReset(0x01)`:写 SDO `[0x11, 0x01]`,读到 `[0x51, 0x01]`
+- 想发 `UDS TransferData(0x36, seq, data)`:写 SDO `[0x36, 0xseq, data...]`(可能需要 segmented SDO)
+
+**优势**:
+- 只有一个 wire protocol: CANopen SDO
+- 工具链只用支持 CANopen,SDO-to-UDS 转换在 master 端做
+- Master-side CANopen SDO 库成熟(`python-canopen` 等)
+- UDS 服务**集中实现**在 firmware 端,`fn handle_uds(payload: &[u8]) -> Vec<u8>`
+
+**劣势**:
+- SDO 协议在 expedited (≤4 bytes) 跟 UDS SF (≤7 bytes) 容量不匹配:UDS SF 最多 7 字节,SDO expedited 最多 4 字节。**需要 segmented SDO 传所有 UDS 消息**,包括 1 字节 UDS
+- 每次 UDS 调用都付 index/subindex overhead(2 字节)
+- 不兼容标准 UDS-over-CAN 工具(需要 CANopen SDO-to-UDS bridge)
+
+**决策 4 修正:** v1 UDS 服务全走 segmented SDO transfer(SDO 协议层支持,自动),master 用 CANopen 工具触发 SDO 读写 `0x2F00.0`,data 字段 = UDS payload。
+
+### 决策 4 的 ISO-TP vs SDO 选型对比(留个 note)
+
+ISO-TP (ISO 15765-2) 跟 CANopen SDO 都是"在 CAN frame 上面拼多帧"。区别:
+- ISO-TP: 1 个 `First Frame` + N 个 `Consecutive Frame` + `Flow Control`,数据流式
+- CANopen SDO: 1 个 `Initiate` + N 个 `Segment`,有 toggle bit,segment 数据有 index/subindex header(只在 initiate 段有)
+
+CANopen SDO 更适合 request/response(带 index),ISO-TP 更适合 fire-and-forget streaming(UDS TransferData)。**我们用 SDO 是因为只传 1 个 UDS 消息**(request-response 模式),OTA TransferData 也可以分段 SDO,虽然慢点但能跑。
+
+如果以后 OTA block size 太大 SDO 不够快,再考虑 ISO-TP。Phase 1-3 用 SDO 一种。
 
 ---
 
