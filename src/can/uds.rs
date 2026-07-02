@@ -347,12 +347,18 @@ fn handle_security_access(payload: &[u8]) -> usize {
         // "request seed level 1".
         0x01 => {
             if SECURITY.load(Ordering::Relaxed) != 0 {
-                // Already unlocked: spec says "requestSeed when
-                // already unlocked" is an error.
-                return store_negative(
-                    SID_SECURITY_ACCESS,
-                    NRC::SecurityAccessDenied,
-                );
+                // Already unlocked: ISO 14229 specifies that
+                // requestSeed returns a positive response with
+                // a zero seed (all bytes 0x00) when the server
+                // is already unlocked — the master uses that to
+                // detect "no key needed, proceed". An NRC here
+                // would make a real master think there's an
+                // authentication problem.
+                return store_positive(&[
+                    SID_SECURITY_ACCESS + 0x40,
+                    0x01,
+                    0x00, 0x00, 0x00, 0x00,
+                ]);
             }
             // Seed = 0xA5A5A5A5 (4 bytes, LE).
             // Response: [0x67, 0x01, 0xA5, 0xA5, 0xA5, 0xA5] (6 bytes).

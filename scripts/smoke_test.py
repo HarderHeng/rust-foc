@@ -444,7 +444,10 @@ class FirmwareEmulator:
         sub = p[0]
         if sub == 0x01:
             if self.uds_security != 0:
-                self.last_response = bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED])
+                # ISO 14229: already-unlocked → positive with
+                # zero seed, NOT an NRC. A real master uses this
+                # as "no key needed, proceed".
+                self.last_response = bytes([SID_SA + 0x40, 0x01, 0x00, 0x00, 0x00, 0x00])
                 return
             # 6-byte response: 0x67, subfunc, seed[4]
             self.last_response = bytes([SID_SA + 0x40, 0x01]) + SEED
@@ -953,6 +956,27 @@ def s_uds_wrong_key(bus: Bus) -> None:
                  "wrong key rejected")
 
 
+def s_uds_request_seed_when_unlocked(bus: Bus) -> None:
+    """ISO 14229: when SecurityAccess is already unlocked,
+    RequestSeed must return a positive response with a zero
+    seed (all bytes 0x00), not an NRC. A real master uses that
+    to detect "no key needed, proceed".
+    """
+    drv = MasterDriver(bus)
+    # Get unlocked: seed + correct key.
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
+    drv.sdo_read(0x2F00, 0)  # consume seed
+    drv.sdo_write_long(0x2F00, 0,
+                       bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
+    drv.sdo_read(0x2F00, 0)  # consume key-accepted
+    # Now ask for seed again — should be positive with 4 zero bytes.
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val,
+                 bytes([SID_SA + 0x40, 0x01, 0x00, 0x00, 0x00, 0x00]),
+                 "requestSeed when unlocked → zero seed")
+
+
 def s_ota_block_seq(bus: Bus) -> None:
     """OTA flow: unlock → program session → RequestDownload (100 B)
     → TransferData seq=1 OK → TransferData seq=3 (wrong) →
@@ -1121,6 +1145,7 @@ SCENARIOS: dict[str, callable] = {
     "uds_security":        s_uds_security_unlock,
     "uds_active_did":      s_uds_active_did,
     "uds_wrong_key":       s_uds_wrong_key,
+    "uds_seed_when_unlocked": s_uds_request_seed_when_unlocked,
     "ota_block_seq":       s_ota_block_seq,
     "nmt":                 s_nmt_states,
     "seg_toggle_mismatch": s_seg_toggle_mismatch,

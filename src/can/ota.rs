@@ -265,17 +265,27 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
 
     // Flush any remaining buffered bytes (padded with 0xFF).
     let next_offset = OTA_NEXT_OFFSET.load(Ordering::Relaxed);
+    let mut flush_error: Option<NRC> = None;
     critical_section::with(|cs| {
         let (buf, len) = &mut *OTA_BUFFER.borrow_ref_mut(cs);
         if *len > 0 {
             let word = u64::from_le_bytes(*buf);
             if unsafe { flash::write_u64(next_offset, word) }.is_err() {
-                warn!("OTA: trailing flush failed");
+                flush_error = Some(NRC::GeneralProgrammingFailure);
+            } else {
+                // Successful flush — no need to bump next_offset
+                // here (the offset already accounts for the bytes
+                // that were buffered; we just finished the write).
             }
         }
         *buf = [0xFF; 8];
         *len = 0;
     });
+    if let Some(nrc) = flush_error {
+        warn!("OTA: trailing flush failed at 0x{:08x}", next_offset);
+        OTA_STATE.store(OtaState::Idle as u8, Ordering::Relaxed);
+        return store_uds_negative(SID_REQUEST_TRANSFER_EXIT, nrc);
+    }
 
     // Finalise CRC32 (XOR with 0xFFFF_FFFF).
     let mut crc = OTA_CRC32.load(Ordering::Relaxed);
@@ -291,7 +301,16 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
     // (magic, size, CRC); the rest of the 2 KB block is
     // whatever it was before (erased 0xFF, or the previous
     // OTA's metadata).
-    write_metadata(image_size, crc);
+    if unsafe { flash::write_metadata(METADATA_MAGIC, image_size, crc) }
+        .is_err()
+    {
+        warn!("OTA: metadata write failed");
+        OTA_STATE.store(OtaState::Idle as u8, Ordering::Relaxed);
+        return store_uds_negative(
+            SID_REQUEST_TRANSFER_EXIT,
+            NRC::GeneralProgrammingFailure,
+        );
+    }
 
     // Mark done; arm the reset.
     OTA_STATE.store(OtaState::Done as u8, Ordering::Relaxed);
@@ -342,30 +361,6 @@ fn crc32_update(crc: u32, byte: u8) -> u32 {
     c
 }
 
-/// Write the post-OTA metadata. Three `u32` writes; the rest
-/// of the 2 KB block is left as-is.
-fn write_metadata(image_size: u32, image_crc32: u32) {
-    // Metadata struct layout (must match src/metadata.rs):
-    //   0x00: magic: u32
-    //   0x04: image_size: u32
-    //   0x08: image_crc32: u32
-    //   0x0C: version: [u8; 16]   (untouched; 0xFF after chip
-    //                              erase, or previous OTA)
-    //   0x1C: build_timestamp: u32 (untouched)
-    const METADATA_MAGIC: u32 = 0xF0C1_001A;
-    const METADATA_ADDR: u32 = 0x0801_F800;
-
-    // 0x0801_F800 is 8-byte aligned; the metadata struct is
-    // u32-aligned. We use raw u32 writes (no HAL flash helper)
-    // for the 12 bytes we care about, and trust the rest of
-    // the 2 KB block to already be 0xFF (or whatever the user
-    // explicitly wrote there previously).
-    unsafe {
-        let p = METADATA_ADDR as *mut u32;
-        // Write magic, size, crc. The 0x0801_F800 + 12 address
-        // is still in the 2 KB block we didn't erase.
-        core::ptr::write_volatile(p, METADATA_MAGIC);
-        core::ptr::write_volatile(p.add(1), image_size);
-        core::ptr::write_volatile(p.add(2), image_crc32);
-    }
-}
+/// Magic word at the start of the post-OTA metadata block.
+/// Must match `src/metadata.rs::METADATA_MAGIC`.
+const METADATA_MAGIC: u32 = 0xF0C1_001A;

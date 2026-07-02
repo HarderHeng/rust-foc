@@ -25,6 +25,14 @@
 
 use embassy_stm32::pac;
 
+/// Flash base address on STM32G4. Page numbers in the FLASH_CR
+/// register are offsets from this address, NOT the absolute
+/// address divided by page size — a previous version of this
+/// file computed `APP_START / ERASE_SIZE = 0x1000` and then
+/// truncated `as u8` to 0, which silently erased only the first
+/// three pages (6 KB) of the 124 KB app region.
+const FLASH_BASE: u32 = 0x0800_0000;
+
 /// 1 KB per page, 2 KB per "large" page. STM32G431 page size
 /// depends on flash size; 128 KB flash ⇒ 2 KB page.
 const ERASE_SIZE: u32 = 2048;
@@ -36,18 +44,34 @@ const WRITE_SIZE: u32 = 8;
 
 /// Start of the user app region. Phase 4 v1: the app occupies
 /// the entire user flash (no bootloader stub).
-pub const APP_START: u32 = 0x0800_0000;
+pub const APP_START: u32 = FLASH_BASE;
 
 /// End of the user app region (exclusive). The 2 KB metadata
 /// block at 0x0801_F800 is reserved and not part of the OTA
 /// image.
 pub const APP_END: u32 = 0x0801_F800;
 
+/// Address of the post-OTA metadata block. Must match the
+/// reader side (typically `src/metadata.rs`).
+pub const METADATA_ADDR: u32 = 0x0801_F800;
+
 #[derive(Debug)]
 pub enum FlashError {
     Unaligned,
     OutOfBounds,
+    /// The 8-byte write would span a 2 KB page boundary. STM32G4
+    /// raises SIZERR if a double-word write isn't contained in
+    /// one page. The caller must either re-align the data or
+    /// split it across two writes at the page boundary.
+    CrossPage,
     ProgramError,
+}
+
+/// Convert an absolute flash address to a page number suitable
+/// for `FLASH_CR.PNB`. STM32G4 page numbers are offsets from
+/// `FLASH_BASE`, not (address / page_size).
+fn page_of(offset: u32) -> u32 {
+    (offset - FLASH_BASE) / ERASE_SIZE
 }
 
 /// Erase the entire app region. Call once at the start of
@@ -58,8 +82,8 @@ pub unsafe fn erase_app_region() -> Result<(), FlashError> {
     unlock_sequence();
     let flash = pac::FLASH;
     flash.cr().modify(|w| w.set_per(true));
-    let start_page = APP_START / ERASE_SIZE;
-    let end_page = APP_END / ERASE_SIZE;
+    let start_page = page_of(APP_START);
+    let end_page = page_of(APP_END);
     for page in start_page..end_page {
         flash.cr().modify(|w| w.set_pnb(page as u8));
         flash.cr().modify(|w| w.set_strt(true));
@@ -88,6 +112,13 @@ pub unsafe fn write_u64(offset: u32, value: u64) -> Result<(), FlashError> {
     if offset < APP_START || offset + WRITE_SIZE > APP_END {
         return Err(FlashError::OutOfBounds);
     }
+    // STM32G4 cannot program a double-word across a page
+    // boundary — the controller raises SIZERR. Reject up front
+    // so the caller gets a clean error rather than a generic
+    // ProgramError.
+    if page_of(offset) != page_of(offset + WRITE_SIZE - 1) {
+        return Err(FlashError::CrossPage);
+    }
     unlock_sequence();
     let flash = pac::FLASH;
     flash.cr().modify(|w| w.set_pg(true));
@@ -103,6 +134,61 @@ pub unsafe fn write_u64(offset: u32, value: u64) -> Result<(), FlashError> {
 /// pass.
 pub fn read_u32(offset: u32) -> u32 {
     unsafe { core::ptr::read_volatile(offset as *const u32) }
+}
+
+/// Write the post-OTA metadata block. Layout (must match the
+/// reader side, typically `src/metadata.rs`):
+///
+///   0x00: magic      (u32, LE)
+///   0x04: image_size (u32, LE)
+///   0x08: image_crc  (u32, LE)
+///   0x0C: padding    (u32, 0xFFFF_FFFF — anything works)
+///
+/// The block is written as two u64s. Both writes must land in
+/// the same page (the metadata block is one page); we check
+/// that explicitly.
+///
+/// The metadata block is NOT erased by `erase_app_region` —
+/// the OTA path needs the previous image's metadata to survive
+/// until `write_metadata` overwrites it (the chip may reboot
+/// between writes if power is lost, and the bootloader would
+/// fall back to the previous image).
+pub unsafe fn write_metadata(
+    magic: u32,
+    image_size: u32,
+    image_crc: u32,
+) -> Result<(), FlashError> {
+    // Single-page check — both u64 writes need to be in the
+    // 0x0801_F800 page.
+    if page_of(METADATA_ADDR) != page_of(METADATA_ADDR + WRITE_SIZE - 1) {
+        // Should be unreachable given our constants, but defend.
+        return Err(FlashError::CrossPage);
+    }
+    // The metadata block lives outside APP_END (it's the 2 KB
+    // reserved area). write_u64 rejects offsets in that range,
+    // so we write it directly here with the same unlock / PG /
+    // wait_busy sequence.
+    unlock_sequence();
+    let flash = pac::FLASH;
+    flash.cr().modify(|w| w.set_pg(true));
+
+    // First u64: magic + image_size (LE).
+    let word0: u64 = (magic as u64) | ((image_size as u64) << 32);
+    core::ptr::write_volatile(METADATA_ADDR as *mut u64, word0);
+    wait_busy();
+    let r = check_and_clear_errors();
+
+    // Second u64: image_crc + padding.
+    if r.is_ok() {
+        let word1: u64 = (image_crc as u64) | (0xFFFF_FFFF_u64 << 32);
+        core::ptr::write_volatile((METADATA_ADDR + 8) as *mut u64, word1);
+        wait_busy();
+        let _ = check_and_clear_errors();
+    }
+
+    flash.cr().modify(|w| w.set_pg(false));
+    lock();
+    r
 }
 
 unsafe fn unlock_sequence() {

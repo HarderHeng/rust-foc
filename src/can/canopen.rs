@@ -143,6 +143,12 @@ pub fn build_heartbeat_frame(state: NmtState) -> Frame {
 /// polls both futures and returns the first to complete) means
 /// an NMT command gets serviced within a few hundred microseconds
 /// of arrival.
+///
+/// Heartbeat period = 0 means "heartbeat disabled" (CiA 301 §3.6.4
+/// — reserved). We represent it with `heartbeat = None` and
+/// block the tick arm on `core::future::pending()` so the loop
+/// only services RX. Constructing `Ticker::every(Duration::from_millis(0))`
+/// would fire on every poll iteration and flood the bus.
 #[embassy_executor::task]
 pub async fn canopen_task(can: &'static mut Can<'static>) {
     info!("CANopen: node {} starting", NODE_ID);
@@ -156,18 +162,44 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
     info!("CANopen: state → Pre-Operational");
 
     // Initial heartbeat ticker; the period may be changed at
-    // runtime by writing 0x1017.0 via SDO. We poll the static
-    // each tick — `AtomicU16::load` is a single relaxed load.
+    // runtime by writing 0x1017.0 via SDO. `None` = disabled
+    // (period = 0). We re-evaluate this at the top of each
+    // loop iteration so period changes take effect on the
+    // next tick (or the next frame).
     let initial_period = heartbeat_period_ms();
     LAST_HEARTBEAT_PERIOD_MS.store(initial_period, Ordering::Relaxed);
-    let mut heartbeat = Ticker::every(Duration::from_millis(initial_period as u64));
+    let mut heartbeat: Option<Ticker> = if initial_period > 0 {
+        Some(Ticker::every(Duration::from_millis(initial_period as u64)))
+    } else {
+        None
+    };
 
     loop {
-        // Race the heartbeat tick against the next received frame.
-        // If a frame arrives, process it (NMT or SDO). If the
-        // tick fires first, send a heartbeat frame.
+        // Re-evaluate the heartbeat period each iteration. If
+        // it changed (and especially if it changed to 0), rebuild
+        // the ticker (or disable it).
+        let current = heartbeat_period_ms();
+        if current != LAST_HEARTBEAT_PERIOD_MS.load(Ordering::Relaxed) {
+            LAST_HEARTBEAT_PERIOD_MS.store(current, Ordering::Relaxed);
+            heartbeat = if current > 0 {
+                Some(Ticker::every(Duration::from_millis(current as u64)))
+            } else {
+                None
+            };
+        }
+
+        // Race the heartbeat tick against the next received
+        // frame. If a frame arrives, process it (NMT or SDO).
+        // If the tick fires first, send a heartbeat frame.
         let rx_fut = can.read();
-        let tick_fut = heartbeat.next();
+        let tick_fut = async {
+            match &mut heartbeat {
+                Some(t) => t.next().await,
+                // Heartbeat disabled — never tick. RX wins the
+                // race every time and we just process frames.
+                None => core::future::pending::<()>().await,
+            }
+        };
         match select(rx_fut, tick_fut).await {
             Either::First(Ok(envelope)) => {
                 let frame = envelope.frame;
@@ -245,7 +277,7 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                 let current = heartbeat_period_ms();
                 if current != LAST_HEARTBEAT_PERIOD_MS.load(Ordering::Relaxed) {
                     LAST_HEARTBEAT_PERIOD_MS.store(current, Ordering::Relaxed);
-                    heartbeat = Ticker::every(Duration::from_millis(current as u64));
+                    heartbeat = Some(Ticker::every(Duration::from_millis(current as u64)));
                 }
             }
         }
