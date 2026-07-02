@@ -1,9 +1,11 @@
 # 设计:CAN-based OTA + CANopen + UDS (替换 y-modem bootloader)
 
 **日期:** 2026-07-02
-**状态:** 设计稿(待确认)
-**目标:** 干掉 y-modem bootloader,把所有 OTA 走 FDCAN1 (PB9 TX, PA11 RX);加简单 CANopen + UDS。
-**预估:** 多 phase 交付,每 phase 1-3 个 commit。本 spec 写完整设计,先确认再开工。
+**状态:** 设计稿(已确认)
+**目标:** 干掉 y-modem bootloader + USART2 上的 ota_update,把所有 OTA 接口完全放在 FDCAN1 (PB9 TX, PA11 RX);加简单 CANopen + UDS。
+**范围澄清:** **shell 仍然走 USART2 (PB3/PB4),不动**。FDCAN1 仅供 OTA 协议栈使用。
+
+**预估:** 多 phase 交付,每 phase 1-3 个 commit。
 
 ---
 
@@ -13,119 +15,79 @@
 
 | Phase | 内容 | 代码量 | 验证方式 |
 |---|---|---|---|
-| 1 | 删旧 OTA + 加 FDCAN1 + CanConsole 走 console | ~600 行删 + ~300 行加 | 编译 + 串口/CAN analyzer |
-| 2 | CANopen (NMT + SDO + heartbeat) | ~800 行 | CANopen 主站/cfuzz 测试 |
-| 3 | UDS (session/DID/ECU reset) | ~500 行 | UDS 模拟器 |
-| 4 | UDS TransferData OTA 流 | ~700 行 | 端到端烧录验证 |
+| 1 | 删旧 OTA + 加 FDCAN1 + NMT + heartbeat | ~600 行删 + ~400 行加 | 编译 + 串口 shell + CAN analyzer |
+| 2 | CANopen SDO server + object dictionary | ~800 行 | CANopen 主站工具 |
+| 3 | UDS 服务(via SDO vendor object 0x2F00) | ~500 行 | UDS master 通过 SDO 触发 |
+| 4 | UDS TransferData OTA 流 + flash 写 + reset | ~700 行 | 端到端烧录验证 |
 
-每次提交都按 phase 走,不要跳。
+每次提交都按 phase 走,不要跳。**shell 不变**,USART2 路径全保留。
 
 ---
 
 ## 1. 4 个必须先定的决策
+
+**重申:以下 4 个决策都是关于 OTA 协议栈,不是关于 shell。Shell 仍然走 USART2 不动。**
 
 ### 决策 1: 留不留 bootloader 存根?
 
 **问题:** 单 bank OTA (没有 scratch 槽) 没法在 128KB flash 里同时放下"正在运行的 app"和"待写入的新 image"。
 
 **选项:**
-- **A. 完全干掉 bootloader (单 bank 写 in-place)**
-  - App 从 `0x0800_0000` 开始,占 124 KB;metadata 占最后 2 KB;中间 2 KB 保留
-  - OTA 边下载边写:新 image 直接覆盖 app slot 的对应地址
-  - 当前 PC 在 4 KB 区间内(最近 4 KB 栈使用 + 当前函数 + 嵌套调用),写入别的 4 KB 区间不会撞
-  - 风险:写失败的 page + 当前 PC 同一行 8 字节 = brick(极小概率)
+- **A. 完全干掉 bootloader (单 bank 写 in-place)** — app 从 `0x0800_0000` 起,占 124 KB,OTA 边下载边写
+  - 风险:写失败的 page + 当前 PC 同一行 8 字节 = brick
   - **不推荐**:线上无备份,生产不可接受
-
-- **B. 留 4 KB bootloader 存根 (双 bank 但用 stub 做 swap)**
-  - Bootloader 在 `0x0800_0000`,4 KB
-  - App 在 `0x0800_1000`,120 KB
-  - OTA 下载到 app slot,假设旧 app 的 bootloader 部分还在运行(bootloader 不参与 OTA)
-  - Bootloader 的活儿:启动时检查"新 image 已写入且 CRC OK" flag,如果有,跳到 app(它直接跳,不做 swap)
-  - 实际 swap 由 app 自己完成:app 在 RAM 里跑"swap" routine,把新 image 字节搬到 app slot
-  - **推荐**:4 KB bootloader 几乎零成本,换来"下载中掉电 = 旧 image 仍在"的安全属性
-
-- **C. bootloader 做 swap (传统)**
-  - Bootloader 8 KB
-  - App 116 KB
-  - Scratch 0 KB(下载到 running slot,in-place 写)
-  - **不推荐**:bootloader 一旦烧坏无救
-
-**推荐选 B。** App slot 120 KB,bootloader 4 KB,剩 4 KB 给 metadata + future 用。
+- **B. 留 4 KB bootloader 存根** — `0x0800_0000` = 4 KB stub,app 在 `0x0800_1000` (120 KB),stub 看 OTA flag 跳到 app
+  - **推荐**:4 KB 成本,换来"下载中掉电 = 旧 image 仍能跑"
+- **C. 8 KB stub 做 swap** — 传统 bootloader 路径,bootloader 收 'commit' 后做 scratch→app 拷贝
+  - **不推荐**:8 KB 成本,代码量翻倍
 
 ### 决策 2: 简单 CANopen 的范围?
 
-**CiA 301 全集** ~400 页。"简单" 意味着子集:
+**CiA 301 全集** ~400 页。子集:
 
 **必选(v1):**
 - NMT 状态机:`Initializing → Pre-operational → Operational`,`Stopped`
-- NMT boot-up message(COB-ID `0x700 + NodeId`)
-- Heartbeat producer(COB-ID `0x700 + NodeId`,周期可配,默认 1 s)
-- NMT command consumer(COB-ID `0x000`,master 发)
-- SDO server(expedited + segmented transfer)
-- 最小 Object Dictionary:`0x1000` DeviceType, `0x1001` ErrorRegister, `0x1017` HeartbeatProducerTime, `0x1018` Identity, `0x2000-0x2FFF` manufacturer area
+- NMT boot-up(COB-ID `0x700 + NodeId`)
+- Heartbeat producer(COB-ID `0x700 + NodeId`,1 Hz)
+- NMT command consumer(COB-ID `0x000`)
+- SDO server(expedited + segmented)
+- 最小 OD:`0x1000` DeviceType, `0x1001` ErrorRegister, `0x1017` HeartbeatProducerTime, `0x1018` Identity, `0x2000-0x2FFF` vendor area
 
-**可选(v2):**
-- TPDO 周期性广播 status
-- SYNC producer / consumer
-- EMCY
-
-**不选(v1 不做):**
-- RPDO(消费 master 来的命令)
-- LSS(Node ID 拨码)
-
-**默认 NodeId: 1**(hardcode,后续可改)
+**可选(v2):** TPDO / SYNC / EMCY
+**不选(v1):** RPDO / LSS
+**默认 NodeId: 1**(hardcode)
 
 ### 决策 3: 简单 UDS 的范围?
 
-**ISO 14229 全集** 几百页。子集:
-
-**必选(v1):**
-- `0x10` DiagnosticSessionControl(Default / Programming)
-- `0x11` ECUReset(HardReset)
-- `0x22` ReadDataByIdentifier
-- `0x2E` WriteDataByIdentifier
-- `0x3E` TesterPresent
-- `0x14` ClearDiagnosticInformation
-- `0x19` ReadDTCInformation(只 subfunc 0x02 reportDTCByStatusMask)
-- `0x27` SecurityAccess(seed/key,简单固定 key 即可)
-
-**OTA 专需(Phase 4):**
-- `0x34` RequestDownload
-- `0x36` TransferData
-- `0x37` RequestTransferExit
-
-**不选:**
-- `0x31` RoutineControl
-- `0x2A` ReadDataByPeriodicIdentifier
-- `0x23` ReadMemoryByAddress / `0x3D` WriteMemoryByAddress(用 0x34/0x36 替代)
-
-**Negative response codes**:`0x12` SubFunctionNotSupported, `0x13` IncorrectMessageLengthOrInvalidFormat, `0x14` ResponseTooLong, `0x22` ConditionsNotCorrect, `0x31` RequestOutOfRange, `0x33` SecurityAccessDenied, `0x72` GeneralProgrammingFailure。
+**必选(v1):** `0x10` Session, `0x11` ECUReset, `0x22` ReadDID, `0x2E` WriteDID, `0x3E` TesterPresent, `0x14` ClearDTC, `0x19` ReadDTC(subfunc 0x02), `0x27` SecurityAccess(seed/key 明文,生产换 HMAC)
+**OTA(Phase 4):** `0x34` RequestDownload, `0x36` TransferData, `0x37` RequestTransferExit
+**NRCs:** `0x12` SubFunctionNotSupported, `0x13` IncorrectMessageLengthOrInvalidFormat, `0x14` ResponseTooLong, `0x22` ConditionsNotCorrect, `0x31` RequestOutOfRange, `0x33` SecurityAccessDenied, `0x72` GeneralProgrammingFailure
 
 ### 决策 4: UDS transport 走 CANopen 还是直接 CAN?
 
-UDS 通常不依赖 CANopen,直接走 ISO-TP (ISO 15765-2) over CAN。两种选择:
+- **A. CAN-TP 独立** — UDS 走独立 COB-ID `0x7DF/0x7E0/0x7E8` + ISO-TP,跟 CANopen 共存但协议栈独立
+- **B. 作为 CANopen 扩展诊断业务** — UDS 走 SDO,定义 vendor object `0x2F00.0` 作为"UDS gateway",data 字段是 UDS payload
+  - 优势:一个 wire protocol,master 工具链只需支持 CANopen
+  - 代价:每次 UDS 调用付 index/subindex overhead;UDS SF >4 bytes 必须用 SDO segmented transfer
 
-- **A. CAN-TP 独立** — UDS 服务独立,跟 CANopen 共存于 FDCAN1,UDS 用独立 COB-ID(比如 `0x7DF` / `0x7E0-0x7E7`)
-- **B. 走 CANopen SDO** — SDO 协议跟 UDS 服务有重叠(indexed 读/写 vs DID 读/写),但语义不完全一致,不推荐混用
-
-**推荐 A**:UDS 走独立 ID + ISO-TP 帧,跟 CANopen 互不干扰。两个协议栈在 driver 层之上互不感知。
+**说明:决策 4 只影响 UDS 服务怎么被 wire,不影响 shell / FOC 控制 / motor 任务。**
 
 ---
 
-## 2. 硬件:FDCAN1 接线 + 时钟
+## 2. 硬件:FDCAN1 接线 + 时钟 (仅供 OTA 协议栈使用,不影响 shell)
 
 **Pin:**
 - TX = PB9 (AF9 for FDCAN1)
 - RX = PA11 (AF9 for FDCAN1)
 
-**Clock:** FDCAN1 在 APB1。`apb1_pre = DIV4` → APB1 = 42.5 MHz。FDCAN 时钟源通常用 HSE(更稳),不分频直接给 FDCAN 内核。`bit_timing` 算:
-- 500 kbps classic CAN: `bit_timing = 42_500_000 / 500_000 = 85` clocks/bit,1 bit = 85 tq,seg1 = 60, seg2 = 25(示例)
+**Clock:** FDCAN1 在 APB1。`apb1_pre = DIV4` → APB1 = 42.5 MHz。FDCAN 时钟源通常用 HSE(更稳),不分频直接给 FDCAN 内核。
+- 500 kbps classic CAN: BT = 42_500_000 / 500_000 = 85
 - 1 Mbps classic CAN: BT = 42.5
-- CAN-FD 1 Mbps nominal / 5 Mbps data: 更复杂,Phase 1 不开
+- CAN-FD 1 Mbps nominal / 5 Mbps data: Phase 1 不开
 
-**Bit timing** 按 500 kbps 起步(工业 CAN 通用,稳健)。后续可调到 1 Mbps。
+**Bit timing** 500 kbps 起步(工业 CAN 通用)。后续可调到 1 Mbps。
 
-**Acceptance filter:** 全部 accept(开发期) → 后续收紧,只收 master ID 范围的帧。
+**Acceptance filter:** 全部 accept(开发期) → 后续收紧。
 
 ---
 
