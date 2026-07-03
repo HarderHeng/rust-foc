@@ -199,6 +199,12 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
             };
         }
 
+        // Phase 5c: drive the UDS pending queue. Advances any
+        // continuations and pushes a 0x78 ResponsePending frame
+        // if the request has been pending longer than P2.
+        // No-op in Phase 5c (no jobs pushed yet).
+        super::uds::tick(embassy_time::Instant::now().elapsed().as_millis() as u32);
+
         // Race the heartbeat tick against the next received
         // frame. If a frame arrives, process it (NMT or SDO).
         // If the tick fires first, send a heartbeat frame.
@@ -296,32 +302,36 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                 // just continue.
             }
             Either::Second(()) => {
-                // Same timeout protection as the SDO TX path —
-                // a bus-off heartbeat would otherwise stall the
-                // executor.
-                let hb_frame = build_heartbeat_frame(state);
-                let tx = can.write(&hb_frame);
-                match embassy_time::with_timeout(
-                    embassy_time::Duration::from_millis(10),
-                    tx,
-                ).await {
-                    Ok(Some(_dropped)) => {
-                        warn!("CANopen: heartbeat frame replaced a pending frame");
+                // Phase 5c: if 0x28 disableNormalCommunication
+                // is active, skip the heartbeat (TX is muted).
+                if !super::uds::tx_disabled() {
+                    // Same timeout protection as the SDO TX path —
+                    // a bus-off heartbeat would otherwise stall the
+                    // executor.
+                    let hb_frame = build_heartbeat_frame(state);
+                    let tx = can.write(&hb_frame);
+                    match embassy_time::with_timeout(
+                        embassy_time::Duration::from_millis(10),
+                        tx,
+                    ).await {
+                        Ok(Some(_dropped)) => {
+                            warn!("CANopen: heartbeat frame replaced a pending frame");
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            warn!("CANopen: heartbeat TX timed out (bus-off?)");
+                        }
                     }
-                    Ok(None) => {}
-                    Err(_) => {
-                        warn!("CANopen: heartbeat TX timed out (bus-off?)");
+                    // Reflect a runtime change of 0x1017.0: if the
+                    // heartbeat period was updated via SDO, restart
+                    // the ticker so the next tick honours the new
+                    // period. We use a static mutable cache to detect
+                    // the change without re-allocating on every tick.
+                    let current = heartbeat_period_ms();
+                    if current != LAST_HEARTBEAT_PERIOD_MS.load(Ordering::Relaxed) {
+                        LAST_HEARTBEAT_PERIOD_MS.store(current, Ordering::Relaxed);
+                        heartbeat = Some(Ticker::every(Duration::from_millis(current as u64)));
                     }
-                }
-                // Reflect a runtime change of 0x1017.0: if the
-                // heartbeat period was updated via SDO, restart
-                // the ticker so the next tick honours the new
-                // period. We use a static mutable cache to detect
-                // the change without re-allocating on every tick.
-                let current = heartbeat_period_ms();
-                if current != LAST_HEARTBEAT_PERIOD_MS.load(Ordering::Relaxed) {
-                    LAST_HEARTBEAT_PERIOD_MS.store(current, Ordering::Relaxed);
-                    heartbeat = Some(Ticker::every(Duration::from_millis(current as u64)));
                 }
             }
         }

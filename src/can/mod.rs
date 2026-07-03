@@ -24,6 +24,7 @@ pub mod od;
 pub mod ota;
 pub mod sdo;
 pub mod uds;
+pub mod uds_config;
 
 use defmt::info;
 use embassy_stm32::{

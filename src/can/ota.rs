@@ -422,7 +422,7 @@ enum NRC {
     WrongBlockSequenceNumber  = 0x73,
 }
 
-/// Forward a UDS positive response into the `LAST_RESPONSE`
+/// Forward a UDS positive response into the shared response
 /// buffer used by the UDS module. The `+ 0x40` is the standard
 /// UDS positive-response offset.
 ///
@@ -431,14 +431,14 @@ enum NRC {
 #[inline(never)]
 #[link_section = ".data"]
 fn store_uds_positive(payload: &[u8]) -> usize {
-    super::uds::store_external_response(payload)
+    crate::can::uds::state::store_response(payload)
 }
 
 /// Same but for negative responses (`[0x7F, SID, NRC]`).
 #[inline(never)]
 #[link_section = ".data"]
 fn store_uds_negative(sid: u8, nrc: NRC) -> usize {
-    super::uds::store_external_response(&[0x7F, sid, nrc as u8])
+    crate::can::uds::state::store_response(&[0x7F, sid, nrc as u8])
 }
 
 /// Standard CRC-32/ISO-HDLC (poly 0x04C1_1DB7), one byte at

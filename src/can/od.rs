@@ -112,7 +112,7 @@ pub fn read(index: u16, sub: u8) -> Result<OdValue, SdoAbort> {
         // Vendor: UDS gateway. Read returns the last UDS response
         // (the master does SDO write then SDO read to do a UDS
         // call; see `super::uds`).
-        (0x2F00, 0) => Ok(super::uds::load_response()),
+        (0x2F00, 0) => Ok(super::uds::load_response_od()),
         // Subindex out of range for 0x1018
         (0x1018, n) if n > 4 => Err(SdoAbort::NoSubindex),
         // No more vendor entries in Phase 3.
