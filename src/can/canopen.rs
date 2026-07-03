@@ -225,9 +225,12 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
         super::uds::tick(embassy_time::Instant::now().elapsed().as_millis() as u32);
 
         // Race the heartbeat tick against the next received
-        // frame. If a frame arrives, process it (NMT or SDO).
+        // frame. If a frame arrives, process it (NMT or UDS).
         // If the tick fires first, send a heartbeat frame.
-        let rx_fut = can.read();
+        // Phase 6 commit 2: use `read_fd` so we can receive
+        // both classic (NMT, heartbeat) and FD (UDS) frames
+        // on the same bus.
+        let rx_fut = can.read_fd();
         let tick_fut = async {
             match &mut heartbeat {
                 Some(t) => t.next().await,
@@ -262,8 +265,10 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                 } else if uds_transport::is_uds_frame(&frame) {
                     // UDS transport: dispatch the UDS request
                     // directly (no CANopen SDO tunnel in Phase 6+).
-                    // The response frame is built from the
-                    // shared UDS response buffer.
+                    // Phase 6 commit 2: UDS uses CAN-FD frames
+                    // (up to 64 bytes) so a single frame covers
+                    // even the long services (0x34 RequestDownload
+                    // = 11 bytes, 0x19 ReadDTC with many DTCs).
                     if let Some(response) = uds_transport::handle_rx_frame(&frame) {
                         // Wrap the TX in a timeout. If FDCAN1 enters
                         // bus-off (wiring fault, error storm), the
@@ -274,7 +279,7 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                         // too. A 10 ms timeout is generous for a
                         // 500 kbps bus — even a multi-frame burst
                         // finishes in well under 1 ms.
-                        let tx = can.write(&response);
+                        let tx = can.write_fd(&response);
                         match embassy_time::with_timeout(
                             embassy_time::Duration::from_millis(10),
                             tx,

@@ -45,38 +45,47 @@ bind_interrupts!(struct CanIrqs {
     FDCAN1_IT1 => IT1InterruptHandler<FDCAN1>;
 });
 
-/// Bit rate of the FDCAN1 bus. 500 kbps is the conservative choice
-/// for industrial CAN, 1 Mbps is the next step up. Phase 1 uses
-/// 500 kbps; the bit-timing register is one call away from a
-/// re-config if the master is 1 Mbps only.
+/// Nominal (arbitration) bit rate. 500 kbps is the conservative
+/// choice for industrial CAN; 1 Mbps is the next step up. Phase 1
+/// uses 500 kbps.
 pub const CAN_BITRATE_BPS: u32 = 500_000;
 
-/// Configure FDCAN1 on PB9 (TX) and PA11 (RX) for classic CAN at
-/// 500 kbps, and return a `Can<'static>` ready for use.
+/// Data-phase bit rate (CAN-FD only). 2 Mbps is the standard
+/// "CAN-FD fast" rate and is 4× the nominal. The driver
+/// computes the TDC (transceiver delay compensation) from the
+/// bit timing parameters.
+pub const CAN_FD_DATA_BITRATE_BPS: u32 = 2_000_000;
+
+/// Configure FDCAN1 on PB9 (TX) and PA11 (RX) for **CAN-FD**
+/// (nominal 500 kbps + data 2 Mbps, up to 64-byte frames),
+/// and return a `Can<'static>` ready for use.
 ///
 /// The returned handle is in `NormalOperationMode` — the bus is
-/// active and can send / receive classic CAN frames. The acceptance
-/// filter is left at the driver default (accept-all) during Phase 1
-/// so the node hears every frame on the bus; tightening to a
-/// master-only filter is a Phase 2/3 concern.
+/// active and can send / receive both classic and FD frames
+/// (mixed bus, FDCAN1 hardware supports both simultaneously).
 ///
-/// **Phase 6**: this is the classic-CAN configuration. A follow-up
-/// commit will switch the data phase to CAN-FD (set_fd_data_bitrate
-/// + FdFrame) so UDS can use up to 64-byte single frames.
+/// **Phase 6 commit 2**: this used to be classic-only. The
+/// switch enables single-frame UDS up to 64 bytes, which
+/// covers the long UDS services (0x34 RequestDownload = 11
+/// bytes, 0x19 ReadDTCInformation with many DTCs) without
+/// multi-frame segmentation. NMT + heartbeat stay on classic
+/// frames (1 byte payload, well under the 8-byte limit).
 pub fn init_fdcan1(
     p_fdcan: embassy_stm32::Peri<'static, FDCAN1>,
     p_tx: embassy_stm32::Peri<'static, impl embassy_stm32::can::TxPin<FDCAN1>>,
     p_rx: embassy_stm32::Peri<'static, impl embassy_stm32::can::RxPin<FDCAN1>>,
 ) -> Can<'static> {
     let mut configurator = CanConfigurator::new(p_fdcan, p_rx, p_tx, CanIrqs);
-    // Bit timing first, then mode. The driver writes the timings
-    // into the NBTP register; classic CAN doesn't need the FDCAN-
-    // specific DBTP / data phase config.
+    // Nominal bitrate (used for arbitration + classic frames).
     configurator.set_bitrate(CAN_BITRATE_BPS);
+    // Data-phase bitrate (used for FD frames only). `true` =
+    // enable transceiver delay compensation (TDC), required
+    // by the FDCAN peripheral at >1 Mbps.
+    configurator.set_fd_data_bitrate(CAN_FD_DATA_BITRATE_BPS, true);
     let can = configurator.into_normal_mode();
     info!(
-        "FDCAN1 ready: {} kbps classic CAN (PB9 TX / PA11 RX)",
-        CAN_BITRATE_BPS / 1000
+        "FDCAN1 ready: CAN-FD {} kbps nominal + {} kbps data (PB9 TX / PA11 RX)",
+        CAN_BITRATE_BPS / 1000, CAN_FD_DATA_BITRATE_BPS / 1000
     );
     can
 }

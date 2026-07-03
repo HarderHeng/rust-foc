@@ -27,7 +27,7 @@
 pub mod can_id;
 pub mod frame;
 
-use embassy_stm32::can::Frame;
+use embassy_stm32::can::frame::FdFrame;
 use embedded_can::Id;
 
 use super::uds;
@@ -45,7 +45,7 @@ pub const COB_ID_PHYSICAL_RESPONSE: u16 = 0x7E8;
 /// True iff the given frame is addressed to one of our UDS
 /// request COB-IDs (functional 0x7DF or physical 0x7E0).
 /// `canopen_task` uses this to route RX frames.
-pub fn is_uds_frame(frame: &Frame) -> bool {
+pub fn is_uds_frame(frame: &FdFrame) -> bool {
     let id = match frame.header().id() {
         Id::Standard(s) => s.as_raw(),
         Id::Extended(_) => return false,
@@ -53,18 +53,17 @@ pub fn is_uds_frame(frame: &Frame) -> bool {
     can_id::is_uds_request_id(id)
 }
 
-/// Handle one received UDS request frame. The frame must pass
-/// `is_uds_frame` (checked by the caller). Builds the UDS
-/// request slice, runs the UDS dispatcher, and on
-/// `DispatchResult::Ready` sends the response frame back.
+/// Handle one received UDS request frame (Phase 6 commit 2:
+/// CAN-FD, 64-byte max). The frame must pass `is_uds_frame`
+/// (checked by the caller). Builds the UDS request slice,
+/// runs the UDS dispatcher, and returns the response frame.
 ///
 /// **Lives in `.data` (RAM).** Called from `canopen_task` for
 /// every UDS request. Keeping the entire UDS receive path
-/// off the OTA write path is the same rationale as Phase 4
-/// (SDO dispatch was RAM-resident for OTA safety).
+/// off the OTA write path is the same rationale as Phase 4.
 #[inline(never)]
 #[link_section = ".data"]
-pub fn handle_rx_frame(frame: &Frame) -> Option<Frame> {
+pub fn handle_rx_frame(frame: &FdFrame) -> Option<FdFrame> {
     let id = match frame.header().id() {
         Id::Standard(s) => s.as_raw(),
         Id::Extended(_) => return None,
