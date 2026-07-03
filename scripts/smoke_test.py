@@ -61,6 +61,13 @@ HEARTBEAT_COB_ID = 0x700 + NODE_ID
 SDO_RX_COB_ID = 0x600 + NODE_ID          # master → slave
 SDO_TX_COB_ID = 0x580 + NODE_ID          # slave → master
 
+# Phase 6: UDS has its own CAN-IDs, decoupled from CANopen SDO.
+# Per ISO 14229-3 §7: functional broadcast 0x7DF, physical request
+# 0x7E0-0x7E7 (per ECU address), physical response 0x7E8-0x7EF.
+UDS_FUNCTIONAL_REQUEST_ID = 0x7DF
+UDS_PHYSICAL_REQUEST_ID  = 0x7E0  # our ECU address = 1
+UDS_PHYSICAL_RESPONSE_ID = 0x7E8  # = request + 8
+
 # SDO command specifiers (top 3 bits of byte 0)
 SDO_CMD_DOWNLOAD   = 0x20  # CCS=1 — Initiate Download Request
 SDO_CMD_DOWNLOAD_SEG = 0x00 # CCS=0 — Download Segment Request
@@ -208,6 +215,41 @@ class FirmwareEmulator:
         self.dl_seg_toggle = 0
         self.dl_seg_idx = 0
         self.dl_seg_sub = 0
+
+    # ---- UDS (Phase 6: independent of CANopen) ----------------------
+
+    def handle_uds(self, frame: dict) -> dict | None:
+        """Phase 6: UDS requests come on 0x7DF (functional) or
+        0x7E0 (physical). We dispatch the payload directly to
+        `_dispatch_uds` (same code path as the legacy SDO tunnel
+        used to take). The response frame is returned on
+        0x7E8 (per ISO 14229-3 §7)."""
+        if frame['id'] not in (UDS_FUNCTIONAL_REQUEST_ID,
+                                UDS_PHYSICAL_REQUEST_ID):
+            return None
+        d = frame['data']
+        # DLC might be < 8 if master sends short frame.
+        dlc = frame['dlc']
+        payload = bytes(d[:dlc])
+        # Skip the empty frame case
+        if not payload:
+            return None
+        self._dispatch_uds(payload)
+        # Build response frame. DLC is the actual response
+        # length (not 8) so the master can distinguish empty
+        # (suppress positive) from short positive.
+        resp_bytes = self.last_response
+        if not resp_bytes:
+            return None  # suppress positive response
+        dlc = len(resp_bytes)
+        # Pad to 8 bytes (classic CAN always sends 8 bytes
+        # unless end-of-frame; we use dlc to convey length)
+        resp_padded = (resp_bytes + b'\x00' * 8)[:8]
+        return {
+            'id': UDS_PHYSICAL_RESPONSE_ID,
+            'data': resp_padded,
+            'dlc': dlc,
+        }
 
     # ---- NMT ---------------------------------------------------------
 
@@ -686,7 +728,11 @@ class SimBus(Bus):
 
     def send(self, frame: dict) -> dict | None:
         if frame['id'] == SDO_RX_COB_ID:
+            # Phase 6 backwards-compat: legacy SDO writes still
+            # dispatch UDS via handle_sdo. New UDS path below.
             return self.fw.handle_sdo(frame)
+        if frame['id'] in (UDS_FUNCTIONAL_REQUEST_ID, UDS_PHYSICAL_REQUEST_ID):
+            return self.fw.handle_uds(frame)
         if frame['id'] == NMT_COB_ID:
             return self.fw.handle_nmt(frame)
         return None
@@ -784,8 +830,10 @@ class CanBus(Bus):
 
 
 class MasterDriver:
-    """Builds SDO request frames, parses responses the same way a
-    real CANopen master would. Asserts on every response byte.
+    """Builds SDO + UDS request frames, parses responses the
+    same way a real master would. Asserts on every response
+    byte. Phase 6: UDS frames go directly on 0x7E0/0x7E8
+    (independent of CANopen SDO).
 
     Talks to a `Bus` (SimBus or CanBus) for actual frame transport;
     the frame builders are identical in both modes."""
@@ -798,6 +846,25 @@ class MasterDriver:
         self.fw = bus.fw if isinstance(bus, SimBus) else None
 
     # ---- low-level frame builders -----------------------------------
+
+    def _frame_uds(self, payload: bytes) -> dict:
+        """Phase 6: build a raw UDS frame on 0x7E0 (physical
+        request). 1-8 bytes payload (classic CAN limit)."""
+        assert 1 <= len(payload) <= 8, f"UDS frame must be 1-8 bytes, got {len(payload)}"
+        return {
+            'id': UDS_PHYSICAL_REQUEST_ID,
+            'data': (payload + b'\x00' * 8)[:8],
+            'dlc': len(payload),
+        }
+
+    def send_uds(self, payload: bytes) -> bytes | None:
+        """Phase 6: send a UDS request, return the response
+        bytes (None on no response, e.g. 0x3E 0x80 suppress)."""
+        frame = self._frame_uds(payload)
+        resp = self.bus.send(frame)
+        if resp is None or resp.get('dlc', 0) == 0:
+            return None
+        return bytes(resp['data'][:resp['dlc']])
 
     def _frame_sdo_write(self, idx: int, sub: int, value: bytes) -> dict:
         assert 1 <= len(value) <= 4
@@ -1103,6 +1170,67 @@ def s_uds_programming_needs_sal(bus: Bus) -> None:
                  "ProgrammingSession without unlock → 0x33")
 
 
+# ---- Phase 6: UDS raw transport scenarios (independent of CANopen) ----
+
+def s_uds_transport_session(bus: Bus) -> None:
+    """Phase 6: UDS request on 0x7E0 (raw transport, no SDO
+    tunnel) returns the same positive response as the
+    legacy 0x2F00 path. Verifies the can_id routing."""
+    drv = MasterDriver(bus)
+    resp = drv.send_uds(bytes([SID_TP, 0x00]))
+    assert_bytes(resp, bytes([SID_TP + 0x40, 0x00]),
+                 "TP via raw UDS 0x7E0")
+
+
+def s_uds_transport_did(bus: Bus) -> None:
+    """Phase 6: ReadDataByIdentifier on 0x7E0 returns
+    0xF186 ActiveDiagSession via raw transport."""
+    drv = MasterDriver(bus)
+    resp = drv.send_uds(bytes([SID_RDBI, 0x86, 0xF1]))
+    assert_bytes(resp, bytes([SID_RDBI + 0x40, 0x86, 0xF1, 0x01]),
+                 "ReadDID 0xF186 via raw UDS")
+
+
+def s_uds_transport_security_full(bus: Bus) -> None:
+    """Phase 6: Full SecurityAccess dance via raw UDS
+    (RequestSeed → SendKey → ProgrammingSession)."""
+    drv = MasterDriver(bus)
+    # RequestSeed
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    assert_bytes(resp, bytes([SID_SA + 0x40, 0x01]) + SEED, "seed")
+    # SendKey
+    resp = drv.send_uds(bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
+    assert_bytes(resp, bytes([SID_SA + 0x40, 0x02]), "key accepted")
+    # ProgrammingSession
+    resp = drv.send_uds(bytes([SID_DSC, 0x02]))
+    assert_bytes(resp, bytes([SID_DSC + 0x40, 0x02]), "DSC 0x02 after unlock")
+
+
+def s_uds_transport_wrong_id(bus: Bus) -> None:
+    """Phase 6: Unknown DID via raw UDS → 0x31 RequestOutOfRange.
+    Verifies the dispatcher runs in raw transport mode."""
+    drv = MasterDriver(bus)
+    resp = drv.send_uds(bytes([SID_RDBI, 0xAB, 0xCD]))
+    assert_bytes(resp, bytes([0x7F, SID_RDBI, NRC_REQUEST_OUT_OF_RANGE]),
+                 "ReadDID unknown via raw UDS → 0x31")
+
+
+def s_uds_transport_no_sdo_dependency(bus: Bus) -> None:
+    """Phase 6 regression guard: send a UDS request on 0x7E0
+    and verify the response COB-ID is 0x7E8 (NOT 0x581 which
+    was the SDO tunnel). Confirms the can_id routing is
+    really independent of the legacy SDO path."""
+    drv = MasterDriver(bus)
+    raw_resp = drv.bus.send(drv._frame_uds(bytes([SID_TP, 0x00])))
+    if raw_resp is None:
+        raise TestFailure("UDS transport: no response")
+    if raw_resp['id'] != UDS_PHYSICAL_RESPONSE_ID:
+        raise TestFailure(
+            f"UDS response on COB-ID 0x{raw_resp['id']:03X} "
+            f"(expected 0x{UDS_PHYSICAL_RESPONSE_ID:03X} = 0x7E8) — "
+            f"still using SDO tunnel?")
+
+
 def s_uds_session_default(bus: Bus) -> None:
     """DiagnosticSessionControl 0x10 0x01 → 0x50 0x01."""
     drv = MasterDriver(bus)
@@ -1372,6 +1500,12 @@ SCENARIOS: dict[str, callable] = {
     "uds_cc_enable_bypass": s_uds_cc_enable_bypass,
     "uds_rc_start":        s_uds_rc_start,
     "uds_rc_result":       s_uds_rc_result,
+    # Phase 6: raw UDS transport (independent of CANopen SDO).
+    "uds_transport_session":      s_uds_transport_session,
+    "uds_transport_did":          s_uds_transport_did,
+    "uds_transport_security_full": s_uds_transport_security_full,
+    "uds_transport_wrong_id":     s_uds_transport_wrong_id,
+    "uds_transport_no_sdo":       s_uds_transport_no_sdo_dependency,
     "ota_block_seq":       s_ota_block_seq,
     "nmt":                 s_nmt_states,
     "seg_toggle_mismatch": s_seg_toggle_mismatch,

@@ -42,10 +42,29 @@ use embassy_futures::select::{select, Either};
 use embassy_stm32::can::{Can, Frame};
 use embassy_time::{Duration, Ticker};
 
-use super::od::heartbeat_period_ms;
 use super::ota;
-use super::sdo::{self, is_sdo_request};
 use super::uds;
+use super::uds_transport;
+
+/// Heartbeat producer period in milliseconds. Was previously
+/// in `src/can/od.rs` (deleted in Phase 6 along with the
+/// CANopen SDO server). 0 = heartbeat disabled (per CiA 301
+/// §3.6.4 reserved value).
+static HEARTBEAT_PRODUCER_MS: AtomicU16 = AtomicU16::new(1000);
+
+/// Get the current heartbeat period. Used by `canopen_task`'s
+/// ticker construction.
+pub fn heartbeat_period_ms() -> u16 {
+    HEARTBEAT_PRODUCER_MS.load(Ordering::Relaxed)
+}
+
+/// Set the heartbeat period. Public for the few callers that
+/// need to override the default (currently none in the
+/// Phase 6+ code base — kept for backwards compatibility
+/// with the legacy 0x1017 OD entry).
+pub fn set_heartbeat_period_ms(ms: u16) {
+    HEARTBEAT_PRODUCER_MS.store(ms, Ordering::Relaxed);
+}
 
 /// Cache of the last heartbeat period the ticker was re-armed
 /// with. Used to avoid re-allocating the `Ticker` on every
@@ -240,18 +259,12 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                             }
                         }
                     }
-                } else if is_sdo_request(&frame) {
-                    // SDO server: parse + dispatch + send response.
-                    // The response may be a 0x60 success, a 0x4_
-                    // upload with the OD value, or a 0x80 abort.
-                    let data: [u8; 8] = {
-                        let mut buf = [0u8; 8];
-                        let len = frame.header().len() as usize;
-                        let src = frame.data();
-                        buf[..len].copy_from_slice(&src[..len]);
-                        buf
-                    };
-                    if let Some(response) = sdo::dispatch(&data) {
+                } else if uds_transport::is_uds_frame(&frame) {
+                    // UDS transport: dispatch the UDS request
+                    // directly (no CANopen SDO tunnel in Phase 6+).
+                    // The response frame is built from the
+                    // shared UDS response buffer.
+                    if let Some(response) = uds_transport::handle_rx_frame(&frame) {
                         // Wrap the TX in a timeout. If FDCAN1 enters
                         // bus-off (wiring fault, error storm), the
                         // embassy write future can pend indefinitely;
@@ -267,11 +280,11 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                             tx,
                         ).await {
                             Ok(Some(_dropped)) => {
-                                warn!("CANopen: SDO response replaced a pending frame");
+                                warn!("CANopen: UDS response replaced a pending frame");
                             }
                             Ok(None) => {} // sent cleanly
                             Err(_) => {
-                                warn!("CANopen: SDO response TX timed out (bus-off?)");
+                                warn!("CANopen: UDS response TX timed out (bus-off?)");
                             }
                         }
                         // After sending the SDO response, check

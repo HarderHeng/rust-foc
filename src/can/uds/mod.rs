@@ -31,9 +31,7 @@ pub mod write_data;
 
 use config::{ServiceHandler, UdsConfig};
 use nrc::Nrc;
-use state::{
-    load_response, store_response, UdsState,
-};
+use state::{store_response, UdsState};
 
 pub use pending::{DispatchResult, take_response, tick as tick_pending};
 pub use state::SrvState;
@@ -130,13 +128,12 @@ pub fn dispatch(request: &[u8]) {
     }
 }
 
-/// Read back the last UDS response as an `OdValue` for SDO read
-/// of `0x2F00.0`. Kept as a free fn for `od::read` to call.
+/// Read back the last UDS response. Kept as a free fn for
+/// Phase 6+ callers (e.g. `uds_transport::handle_rx_frame`).
 #[inline(never)]
 #[link_section = ".data"]
-pub fn load_response_od() -> crate::can::od::OdValue {
-    let (bytes, len) = load_response();
-    crate::can::od::OdValue { bytes, len }
+pub fn load_response() -> ([u8; 7], u8) {
+    crate::can::uds::state::load_response()
 }
 
 // `SrvState` re-exported so callers (canopen_task, sdo) can match
