@@ -301,7 +301,12 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                         // to make it out before NVIC tears
                         // the chip down.
                         if uds::take_reset_request() || ota::take_reset_request() {
-                            info!("UDS/OTA: NVIC reset in 10 ms");
+                            let kind = match uds::take_reset_subfunc() {
+                                Some(0x01) => "Hard",
+                                Some(0x03) => "Soft",
+                                _ => "OTA",
+                            };
+                            info!("UDS/OTA: NVIC {} reset in 10 ms", kind);
                             // 10 ms at 170 MHz; lets the last
                             // TX byte (and any pending CAN
                             // frame) reach the wire.

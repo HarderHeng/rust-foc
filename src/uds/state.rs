@@ -32,11 +32,18 @@ impl Session {
 pub enum SecurityLevel {
     Locked = 0,
     Sal1 = 1,
+    Sal2 = 2,
+    Sal3 = 3,
 }
 
 impl SecurityLevel {
     pub fn from_u8(v: u8) -> Self {
-        if v >= 1 { Self::Sal1 } else { Self::Locked }
+        match v {
+            0 => Self::Locked,
+            1 => Self::Sal1,
+            2 => Self::Sal2,
+            _ => Self::Sal3,
+        }
     }
     pub const fn as_u8(self) -> u8 { self as u8 }
 }

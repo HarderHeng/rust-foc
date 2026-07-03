@@ -125,9 +125,11 @@ SEED = b'\xA5\xA5\xA5\xA5'
 
 # Phase 5a: SecurityAccess key derived from the seed via the
 # Rust LFSR + bit-reversal algorithm (see src/can/uds/security.rs).
-# The mask matches the `key_masks[0]` in src/can/uds_config.rs.
+# The masks match `key_masks[0..2]` in src/uds/uds_config.rs.
 # Computed by hand (see scripts/smoke_test.py commit history).
 LFSR_MASK_SAL1 = 0x30002212
+LFSR_MASK_SAL2 = 0x524C5E63
+LFSR_MASK_SAL3 = 0xA5C3F11B
 
 def _reverse_bits(b: int) -> int:
     b = ((b & 0xAA) >> 1) | ((b & 0x55) << 1)
@@ -149,9 +151,11 @@ def _lfsr_key(seed: int, mask: int) -> int:
     return key
 
 # Hardcoded so existing tests can reference the value directly.
-# Run `_lfsr_key(0xA5A5A5A5, 0x30002212)` to recompute if the
-# algorithm ever changes.
-KEY = _lfsr_key(0xA5A5A5A5, LFSR_MASK_SAL1)  # = 0x497DFE82
+# Run `_lfsr_key(0xA5A5A5A5, <mask>)` to recompute if the
+# algorithm or masks ever change.
+KEY       = _lfsr_key(0xA5A5A5A5, LFSR_MASK_SAL1)  # = 0x497DFE82
+KEY_SAL2  = _lfsr_key(0xA5A5A5A5, LFSR_MASK_SAL2)
+KEY_SAL3  = _lfsr_key(0xA5A5A5A5, LFSR_MASK_SAL3)
 
 
 # ---- CRC-32/ISO-HDLC (matches src/can/ota.rs::crc32_update) -------
@@ -487,14 +491,21 @@ class FirmwareEmulator:
             self.uds_session = 0x02
             self.uds_security = 0
             self.last_response = bytes([SID_DSC + 0x40, 0x02])
+        elif sub == 0x03:
+            if self.uds_security == 0:
+                self.last_response = bytes([0x7F, SID_DSC, NRC_SECURITY_ACCESS_DENIED])
+                return
+            self.uds_session = 0x03
+            self.uds_security = 0
+            self.last_response = bytes([SID_DSC + 0x40, 0x03])
         else:
             self.last_response = bytes([0x7F, SID_DSC, NRC_SUB_FUNC_NOT_SUPPORTED])
 
     def _uds_er(self, p: bytes) -> None:
-        if len(p) != 1 or p[0] != 0x01:
+        if len(p) != 1 or p[0] not in (0x01, 0x03):
             self.last_response = bytes([0x7F, SID_ER, NRC_SUB_FUNC_NOT_SUPPORTED])
             return
-        self.last_response = bytes([SID_ER + 0x40, 0x01])
+        self.last_response = bytes([SID_ER + 0x40, p[0]])
 
     def _uds_cdi(self, p: bytes) -> None:
         if len(p) != 3:
@@ -530,6 +541,19 @@ class FirmwareEmulator:
             self.last_response = bytes([0x7F, SID_SA, NRC_INCORRECT_MESSAGE_LENGTH])
             return
         sub = p[0]
+        # Per-SAL session gate (matches Rust sal_session_allowed).
+        if sub in (0x01, 0x02) and self.uds_session not in (0x01, 0x02):
+            self.last_response = bytes(
+                [0x7F, SID_SA, NRC_SUB_FUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION])
+            return
+        if sub in (0x03, 0x04) and self.uds_session not in (0x02, 0x03):
+            self.last_response = bytes(
+                [0x7F, SID_SA, NRC_SUB_FUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION])
+            return
+        if sub in (0x05, 0x06) and self.uds_session != 0x03:
+            self.last_response = bytes(
+                [0x7F, SID_SA, NRC_SUB_FUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION])
+            return
         if sub == 0x01:
             if self.uds_security != 0:
                 # ISO 14229: already-unlocked → positive with
@@ -547,6 +571,36 @@ class FirmwareEmulator:
             if key == KEY:
                 self.uds_security = 1
                 self.last_response = bytes([SID_SA + 0x40, 0x02])
+            else:
+                self.last_response = bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED])
+        elif sub == 0x03:
+            if self.uds_security >= 2:
+                self.last_response = bytes([SID_SA + 0x40, 0x03, 0x00, 0x00, 0x00, 0x00])
+                return
+            self.last_response = bytes([SID_SA + 0x40, 0x03]) + SEED
+        elif sub == 0x04:
+            if len(p) != 5:
+                self.last_response = bytes([0x7F, SID_SA, NRC_INCORRECT_MESSAGE_LENGTH])
+                return
+            key = struct.unpack_from('<I', p, 1)[0]
+            if key == KEY_SAL2:
+                self.uds_security = 2
+                self.last_response = bytes([SID_SA + 0x40, 0x04])
+            else:
+                self.last_response = bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED])
+        elif sub == 0x05:
+            if self.uds_security >= 3:
+                self.last_response = bytes([SID_SA + 0x40, 0x05, 0x00, 0x00, 0x00, 0x00])
+                return
+            self.last_response = bytes([SID_SA + 0x40, 0x05]) + SEED
+        elif sub == 0x06:
+            if len(p) != 5:
+                self.last_response = bytes([0x7F, SID_SA, NRC_INCORRECT_MESSAGE_LENGTH])
+                return
+            key = struct.unpack_from('<I', p, 1)[0]
+            if key == KEY_SAL3:
+                self.uds_security = 3
+                self.last_response = bytes([SID_SA + 0x40, 0x06])
             else:
                 self.last_response = bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED])
         else:
@@ -1269,6 +1323,88 @@ def s_uds_security_unlock(bus: Bus) -> None:
     assert_bytes(val, bytes([SID_DSC + 0x40, 0x02]), "DSC 0x02 after unlock")
 
 
+def s_uds_security_sal2(bus: Bus) -> None:
+    """SAL2 unlock dance. Per ISO 14229 practice, SAL2 is reachable
+    from ProgrammingSession or ExtendedSession (we use Programming
+    here to keep the test independent of the ExtendedSession
+    subfuncs). Subfunc 0x03/0x04 use a different LFSR mask
+    (key_masks[1] = 0x524C_5E63), so the key is different from
+    SAL1 even though the seed is the same.
+    """
+    drv = MasterDriver(bus)
+    # Unlock SAL1 first.
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
+    drv.sdo_read(0x2F00, 0)
+    drv.sdo_write_long(0x2F00, 0,
+                       bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
+    drv.sdo_read(0x2F00, 0)
+    # Enter ProgrammingSession (clears SAL, but we re-do it).
+    drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x02]))
+    drv.sdo_read(0x2F00, 0)
+    # RequestSeed SAL2.
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x03]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_SA + 0x40, 0x03]) + SEED, "SAL2 seed")
+    # SendKey SAL2 (different mask → different key).
+    drv.sdo_write_long(0x2F00, 0,
+                       bytes([SID_SA, 0x04]) + struct.pack('<I', KEY_SAL2))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_SA + 0x40, 0x04]), "SAL2 unlocked")
+
+
+def s_uds_security_sal3(bus: Bus) -> None:
+    """SAL3 unlock dance. SAL3 is only reachable from ExtendedSession
+    per `sal_session_allowed`. Verifies the gate: SAL3 seed from
+    DefaultSession is denied with `SubFunctionNotSupportedInActiveSession`.
+    """
+    drv = MasterDriver(bus)
+    # 1. Default session → SAL3 denied (need Extended first).
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x05]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes(
+        [0x7F, SID_SA, NRC_SUB_FUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION]),
+        "SAL3 denied in Default session")
+    # 2. Unlock SAL1, enter Programming, then enter Extended.
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
+    drv.sdo_read(0x2F00, 0)
+    drv.sdo_write_long(0x2F00, 0,
+                       bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
+    drv.sdo_read(0x2F00, 0)
+    drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x03]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_DSC + 0x40, 0x03]), "ExtendedSession accepted")
+    # 3. RequestSeed SAL3.
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x05]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_SA + 0x40, 0x05]) + SEED, "SAL3 seed")
+    # 4. SendKey SAL3 (key_masks[2] = 0xA5C3_F11B).
+    drv.sdo_write_long(0x2F00, 0,
+                       bytes([SID_SA, 0x06]) + struct.pack('<I', KEY_SAL3))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_SA + 0x40, 0x06]), "SAL3 unlocked")
+
+
+def s_uds_reset_soft(bus: Bus) -> None:
+    """0x11 0x03 SoftReset → 0x51 0x03 (without firing the
+    actual NVIC reset — the emulator just stashes the response).
+    Also verifies 0x11 0x01 HardReset still works.
+    """
+    drv = MasterDriver(bus)
+    # SoftReset.
+    drv.sdo_write(0x2F00, 0, bytes([SID_ER, 0x03]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_ER + 0x40, 0x03]), "SoftReset response")
+    # HardReset (regression — should still work).
+    drv.sdo_write(0x2F00, 0, bytes([SID_ER, 0x01]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_ER + 0x40, 0x01]), "HardReset response")
+    # Unknown subfunc → SubFunctionNotSupported.
+    drv.sdo_write(0x2F00, 0, bytes([SID_ER, 0x02]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([0x7F, SID_ER, NRC_SUB_FUNC_NOT_SUPPORTED]),
+                 "ER 0x02 rejected")
+
+
 def s_uds_active_did(bus: Bus) -> None:
     """ReadDataByIdentifier 0xF186 → 0x62 0x86 0xF1 <session>."""
     drv = MasterDriver(bus)
@@ -1489,6 +1625,9 @@ SCENARIOS: dict[str, callable] = {
     # bypasses SDO and uses a direct UDS dispatcher call.
     "uds_session":         s_uds_session_default,
     "uds_security":        s_uds_security_unlock,
+    "uds_security_sal2":   s_uds_security_sal2,
+    "uds_security_sal3":   s_uds_security_sal3,
+    "uds_reset_soft":      s_uds_reset_soft,
     "uds_active_did":      s_uds_active_did,
     "uds_wrong_key":       s_uds_wrong_key,
     "uds_seed_when_unlocked": s_uds_request_seed_when_unlocked,

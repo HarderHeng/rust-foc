@@ -4,11 +4,16 @@
 //!   RequestSeed:  [0x27, 0x01/0x03/0x05, ...]  → [0x67, sub, seed[4]]
 //!   SendKey:     [0x27, 0x02/0x04/0x06, key[4]] → [0x67, sub] or 0x35
 //!
+//! Subfunc-to-SAL mapping (odd = RequestSeed, even = SendKey):
+//!   0x01/0x02 = SAL1  (Default or Programming session)
+//!   0x03/0x04 = SAL2  (Programming or Extended session)
+//!   0x05/0x06 = SAL3  (Extended session only)
+//!
 //! Phase 5a uses a hardcoded seed (0xA5A5_A5A5) for SAL1 to keep
 //! the wire format identical to Phase 4 — the existing smoke test
-//! `s_uds_security_unlock` expects this exact seed. Phase 5d will
-//! add a true random seed from the SysTick + LFSR noise; the key
-//! derivation algorithm is unchanged.
+//! `s_uds_security_unlock` expects this exact seed. The same
+//! seed is used for SAL2/3 in the smoke test (different keys
+//! expected per SAL because of distinct LFSR masks).
 //!
 //! Key derivation: LFSR with bit reversal, masks per SAL.
 //! (Per design doc §3.4 / §4.5; algorithm compatible with MiniUds.)
@@ -51,17 +56,46 @@ pub fn generate_key(seed: u32, mask: u32) -> u32 {
     key
 }
 
-/// SAL1 seed (Phase 5a: hardcoded for smoke test compatibility).
-/// Phase 5d will replace with `(config.random_seed)()` from
-/// SysTick noise.
-const SEED_SAL1: u32 = 0xA5A5_A5A5;
+/// Hardcoded seed for all 3 SAL levels (Phase 5a: keeps the
+/// wire format identical to Phase 4 — the existing smoke test
+/// `s_uds_security_unlock` expects the SAL1 seed; SAL2/3 use
+/// the same seed value but produce different keys because of
+/// distinct LFSR masks). Phase 5d will replace with
+/// `(config.random_seed)()` from SysTick noise.
+const SEED_ALL: u32 = 0xA5A5_A5A5;
+
+/// Map a 0x27 subfunc to (SAL number, RequestSeed?).
+///
+/// Subfunc 0x01/0x02 → SAL1, 0x03/0x04 → SAL2, 0x05/0x06 → SAL3.
+/// Any other subfunc is `None` (handler returns
+/// `SubFunctionNotSupported`).
+fn parse_subfunc(subfunc: u8) -> Option<(u8, bool)> {
+    match subfunc {
+        0x01 => Some((1, true)),
+        0x02 => Some((1, false)),
+        0x03 => Some((2, true)),
+        0x04 => Some((2, false)),
+        0x05 => Some((3, true)),
+        0x06 => Some((3, false)),
+        _ => None,
+    }
+}
+
+/// Per-SAL session gate. SAL1 is accessible from Default or
+/// Programming; SAL2 from Programming or Extended; SAL3 from
+/// Extended only. (ProgrammingSession itself requires SAL1 —
+/// the 0x10 0x02 gate is handled in `session::handle`.)
+fn sal_session_allowed(sal: u8, session: Session) -> bool {
+    match sal {
+        1 => matches!(session, Session::Default | Session::Programming),
+        2 => matches!(session, Session::Programming | Session::Extended),
+        3 => matches!(session, Session::Extended),
+        _ => false,
+    }
+}
 
 /// Dispatch a 0x27 request. `req` is the UDS payload **including**
 /// the SID byte (i.e. `req[0] == 0x27`).
-///
-/// Returns the response length (always 2 for positive, 3 for
-/// negative). The response is also stashed in the shared response
-/// buffer for SDO reads.
 pub fn handle(state: &mut UdsState, config: &UdsConfig, req: &[u8]) {
     if req.len() < 2 {
         store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
@@ -69,43 +103,36 @@ pub fn handle(state: &mut UdsState, config: &UdsConfig, req: &[u8]) {
         return;
     }
     let subfunc = req[1];
-    let is_request_seed = match subfunc {
-        0x01 => true,   // SAL1 RequestSeed
-        0x02 => false,  // SAL1 SendKey
-        // SAL2/3 deferred (would need their own keys in key_masks)
-        _ => {
+    let (sal, is_request_seed) = match parse_subfunc(subfunc) {
+        Some(v) => v,
+        None => {
             store_response(&Nrc::SubFunctionNotSupported.negative_response(0x27));
             return;
         }
     };
 
-    // Session gate: SAL1 is accessible from Default or
-    // Programming. (ProgrammingSession itself requires SAL1 —
-    // 0x10 0x02's gate is handled in `session::handle`.)
-    if !matches!(state.session, Session::Default | Session::Programming) {
+    if !sal_session_allowed(sal, state.session) {
         store_response(&Nrc::SubFunctionNotSupportedInActiveSession
             .negative_response(0x27));
         return;
     }
 
     if is_request_seed {
-        handle_request_seed(state, subfunc);
+        handle_request_seed(state, sal, subfunc);
     } else {
-        handle_send_key(state, config, subfunc, req);
+        handle_send_key(state, config, sal, subfunc, req);
     }
 }
 
-fn handle_request_seed(state: &mut UdsState, subfunc: u8) {
-    if state.security as u8 >= 1 {
-        // Already unlocked: ISO 14229 says positive response
-        // with a zero seed (master uses this to detect
-        // "no key needed").
+fn handle_request_seed(state: &mut UdsState, sal: u8, subfunc: u8) {
+    if (state.security as u8) >= sal {
+        // Already unlocked at this SAL (or higher): ISO 14229
+        // says positive response with a zero seed (master uses
+        // this to detect "no key needed").
         store_response(&[subfunc + 0x40, subfunc, 0x00, 0x00, 0x00, 0x00]);
         return;
     }
-    // Phase 5a: hardcoded SAL1 seed. Phase 5d will switch to
-    // `(config.random_seed)()` for true randomness.
-    let seed = SEED_SAL1;
+    let seed = SEED_ALL;
     state.current_seed = seed;
     state.seed_sent = true;
     let resp = [
@@ -115,11 +142,12 @@ fn handle_request_seed(state: &mut UdsState, subfunc: u8) {
         (seed >> 8) as u8,
         seed as u8,
     ];
-    info!("UDS: SecurityAccess RequestSeed → 0x{:08x}", seed);
+    info!("UDS: SecurityAccess RequestSeed(SAL{}) → 0x{:08x}", sal, seed);
     store_response(&resp);
 }
 
-fn handle_send_key(state: &mut UdsState, config: &UdsConfig, subfunc: u8, req: &[u8]) {
+fn handle_send_key(state: &mut UdsState, config: &UdsConfig, sal: u8,
+                   subfunc: u8, req: &[u8]) {
     if !state.seed_sent {
         store_response(&Nrc::RequestSequenceError.negative_response(0x27));
         return;
@@ -131,15 +159,15 @@ fn handle_send_key(state: &mut UdsState, config: &UdsConfig, subfunc: u8, req: &
     }
     state.seed_sent = false;
     let rx_key = u32::from_le_bytes([req[2], req[3], req[4], req[5]]);
-    let expected = generate_key(state.current_seed, config.key_masks[0]);
+    let expected = generate_key(state.current_seed, config.key_masks[(sal - 1) as usize]);
     if rx_key != expected {
-        info!("UDS: SecurityAccess wrong key 0x{:08x} (expected 0x{:08x})",
-              rx_key, expected);
+        info!("UDS: SecurityAccess SAL{} wrong key 0x{:08x} (expected 0x{:08x})",
+              sal, rx_key, expected);
         store_response(&Nrc::InvalidKey.negative_response(0x27));
         return;
     }
-    state.security = SecurityLevel::Sal1;
-    info!("UDS: SecurityAccess unlocked to SAL1");
+    state.security = SecurityLevel::from_u8(sal);
+    info!("UDS: SecurityAccess unlocked to SAL{}", sal);
     store_response(&[subfunc + 0x40, subfunc]);
 }
 

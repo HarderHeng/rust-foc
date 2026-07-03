@@ -47,6 +47,7 @@ pub use state::SrvState;
 /// Phase 4 used to call `uds::take_reset_request()`; now we re-export
 /// the per-module flag from `reset::take_reset_request`.
 pub use reset::take_reset_request;
+pub use reset::take_reset_subfunc;
 
 /// Public helper: returns true if the canopen task should
 /// suppress its proactive frames (heartbeat, NMT ACK) because
