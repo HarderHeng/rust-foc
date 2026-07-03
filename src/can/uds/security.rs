@@ -17,7 +17,7 @@ use defmt::info;
 
 use super::config::UdsConfig;
 use super::nrc::Nrc;
-use super::state::{store_response, Session, SecurityLevel, UdsState};
+use super::state::{store_response, SecurityLevel, Session, UdsState};
 
 /// 8-bit bit reversal. Used by `generate_key` to scramble the LFSR
 /// output bytes before assembly.
@@ -69,60 +69,45 @@ pub fn handle(state: &mut UdsState, config: &UdsConfig, req: &[u8]) {
         return;
     }
     let subfunc = req[1];
-
-    // Map subfunc to SAL index (0/1/2) and request/response kind.
-    let (sal_idx, is_request_seed) = match subfunc {
-        0x01 => (0usize, true),   // SAL1 RequestSeed
-        0x02 => (0usize, false),  // SAL1 SendKey
-        0x03 => (1usize, true),   // SAL2 RequestSeed
-        0x04 => (1usize, false),  // SAL2 SendKey
-        0x05 => (2usize, true),   // SAL3 RequestSeed
-        0x06 => (2usize, false),  // SAL3 SendKey
+    let is_request_seed = match subfunc {
+        0x01 => true,   // SAL1 RequestSeed
+        0x02 => false,  // SAL1 SendKey
+        // SAL2/3 deferred (would need their own keys in key_masks)
         _ => {
             store_response(&Nrc::SubFunctionNotSupported.negative_response(0x27));
             return;
         }
     };
-    let required_sal = match sal_idx {
-        0 => SecurityLevel::Sal1,
-        1 => SecurityLevel::Sal2,
-        2 => SecurityLevel::Sal3,
-        _ => unreachable!(),
-    };
 
-    // Session gate: SAL1 accessible from Default or Programming.
-    // SAL2/3 only from Extended (a stricter gate, per ISO 14229
-    // practice).
-    let session_ok = match sal_idx {
-        0 => matches!(state.session, Session::Default | Session::Programming),
-        _ => state.session == Session::Extended,
-    };
-    if !session_ok {
+    // Session gate: SAL1 is accessible from Default or
+    // Programming. (ProgrammingSession itself requires SAL1 —
+    // 0x10 0x02's gate is handled in `session::handle`.)
+    if !matches!(state.session, Session::Default | Session::Programming) {
         store_response(&Nrc::SubFunctionNotSupportedInActiveSession
             .negative_response(0x27));
         return;
     }
 
     if is_request_seed {
-        handle_request_seed(state, subfunc, required_sal);
+        handle_request_seed(state, subfunc);
     } else {
-        handle_send_key(state, config, subfunc, required_sal, sal_idx, req);
+        handle_send_key(state, config, subfunc, req);
     }
 }
 
-fn handle_request_seed(state: &mut UdsState, subfunc: u8, required_sal: SecurityLevel) {
-    if state.security >= required_sal {
-        // Already unlocked: ISO 14229 says positive response with
-        // a zero seed (master uses this to detect "no key needed").
+fn handle_request_seed(state: &mut UdsState, subfunc: u8) {
+    if state.security as u8 >= 1 {
+        // Already unlocked: ISO 14229 says positive response
+        // with a zero seed (master uses this to detect
+        // "no key needed").
         store_response(&[subfunc + 0x40, subfunc, 0x00, 0x00, 0x00, 0x00]);
         return;
     }
     // Phase 5a: hardcoded SAL1 seed. Phase 5d will switch to
     // `(config.random_seed)()` for true randomness.
     let seed = SEED_SAL1;
-    let sal_idx = (required_sal as u8 - 1) as usize;
-    state.current_seed[sal_idx] = seed;
-    state.seed_sent[sal_idx] = true;
+    state.current_seed = seed;
+    state.seed_sent = true;
     let resp = [
         subfunc + 0x40, subfunc,
         (seed >> 24) as u8,
@@ -130,20 +115,12 @@ fn handle_request_seed(state: &mut UdsState, subfunc: u8, required_sal: Security
         (seed >> 8) as u8,
         seed as u8,
     ];
-    info!("UDS: SecurityAccess RequestSeed SAL{} → 0x{:08x}",
-          sal_idx + 1, seed);
+    info!("UDS: SecurityAccess RequestSeed → 0x{:08x}", seed);
     store_response(&resp);
 }
 
-fn handle_send_key(
-    state: &mut UdsState,
-    config: &UdsConfig,
-    subfunc: u8,
-    required_sal: SecurityLevel,
-    sal_idx: usize,
-    req: &[u8],
-) {
-    if !state.seed_sent[sal_idx] {
+fn handle_send_key(state: &mut UdsState, config: &UdsConfig, subfunc: u8, req: &[u8]) {
+    if !state.seed_sent {
         store_response(&Nrc::RequestSequenceError.negative_response(0x27));
         return;
     }
@@ -152,26 +129,19 @@ fn handle_send_key(
             .negative_response(0x27));
         return;
     }
-    state.seed_sent[sal_idx] = false;
+    state.seed_sent = false;
     let rx_key = u32::from_le_bytes([req[2], req[3], req[4], req[5]]);
-    let expected = generate_key(state.current_seed[sal_idx], config.key_masks[sal_idx]);
+    let expected = generate_key(state.current_seed, config.key_masks[0]);
     if rx_key != expected {
         info!("UDS: SecurityAccess wrong key 0x{:08x} (expected 0x{:08x})",
               rx_key, expected);
         store_response(&Nrc::InvalidKey.negative_response(0x27));
         return;
     }
-    state.security = required_sal;
-    info!("UDS: SecurityAccess unlocked to SAL{}", sal_idx + 1);
+    state.security = SecurityLevel::Sal1;
+    info!("UDS: SecurityAccess unlocked to SAL1");
     store_response(&[subfunc + 0x40, subfunc]);
 }
-
-// `store_negative` is exposed for completeness; handlers in this
-// module prefer to write the full negative response explicitly so
-// the SID + 0x40 offset and the 0x7F header are visible at the
-// call site.
-#[allow(dead_code)]
-pub use super::state::store_negative as _store_negative;
 
 #[cfg(test)]
 mod tests {

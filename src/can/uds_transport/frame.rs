@@ -7,7 +7,6 @@
 //! stay on classic CAN (1 byte payload, no need to upgrade).
 
 use embassy_stm32::can::frame::FdFrame;
-use embedded_can::Id;
 
 use crate::can::uds::state::load_response;
 use crate::can::uds_transport::can_id::response_id_for_request;

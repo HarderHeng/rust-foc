@@ -25,8 +25,6 @@ pub enum ServiceHandler {
     CommControl,
     SecurityAccess,
     RoutineStart,
-    RoutineStop,
-    RoutineResult,
     RequestDownload,
     TransferData,
     TransferExit,
@@ -112,13 +110,11 @@ pub struct UdsConfig {
     /// `Box<dyn FnMut>` which isn't `Sync`.
     pub pending_queue: &'static mut [Option<crate::can::uds::pending::PendingJob>],
 
-    /// P2 server timer (ms). When a request stays in `SrvState::Pending`
-    /// for longer than this, dispatcher pushes a 0x78 response.
-    /// ISO 14229 standard: 50 ms.
+    /// P2 server timer (ms). When a request stays in
+    /// `SrvState::Pending` for longer than this, the
+    /// dispatcher pushes a 0x78 response. ISO 14229 standard:
+    /// 50 ms.
     pub p2_server_ms: u32,
-    /// P2* extended timer (ms). After this, client should give up.
-    /// ISO 14229 standard: 5000 ms.
-    pub p2_star_ms: u32,
 
     /// Per-SAL LFSR mask. Index 0/1/2 = SAL1/2/3.
     pub key_masks: [u32; 3],

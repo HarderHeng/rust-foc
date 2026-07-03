@@ -37,29 +37,27 @@ pub fn handle(state: &mut UdsState, req: &[u8]) {
     match subfunc {
         0x00 => {
             state.tx_disabled = false;
-            state.rx_disabled = false;
-            info!("UDS: CommControl enable (TX+RX ON)");
+            info!("UDS: CommControl enable (TX ON)");
             store_response(&[0x68, 0x00]);
         }
         0x01 => {
             // enableRxDisableTx: keep listening, but stop transmitting.
             state.tx_disabled = true;
-            state.rx_disabled = false;
-            info!("UDS: CommControl enableRxDisableTx (TX OFF, RX ON)");
+            info!("UDS: CommControl enableRxDisableTx (TX OFF)");
             store_response(&[0x68, 0x01]);
         }
         0x02 => {
-            // enableTxDisableRx: keep transmitting, but drop incoming.
-            state.tx_disabled = false;
-            state.rx_disabled = true;
-            info!("UDS: CommControl enableTxDisableRx (TX ON, RX OFF)");
+            // enableTxDisableRx: advisory only (Phase 5b: the
+            // dispatcher always accepts incoming SDO/UDS frames
+            // regardless; future phase may wire it into
+            // canopen_task). Master sees the positive response.
+            info!("UDS: CommControl enableTxDisableRx (advisory)");
             store_response(&[0x68, 0x02]);
         }
         0x03 => {
             // disableNormalCommunication: full silence.
             state.tx_disabled = true;
-            state.rx_disabled = true;
-            info!("UDS: CommControl disable (TX+RX OFF)");
+            info!("UDS: CommControl disable (TX OFF)");
             store_response(&[0x68, 0x03]);
         }
         _ => {

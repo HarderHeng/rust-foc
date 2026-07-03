@@ -57,33 +57,24 @@ pub fn tick(now_ms: u32) {
     pending::tick(state, config, now_ms);
 }
 
-/// Top-level UDS state + response buffer. `static` so it's a single
-/// instance; lifetime is `'static`. The response buffer is shared
-/// with the SDO read path on `0x2F00.0`.
+/// Top-level UDS state. `static` so it's a single instance.
 pub static UDS_STATE: UdsState = UdsState::zeroed();
 
-/// Initialize UDS state to defaults. Idempotent; safe to call
-/// from `main` before the canopen task starts.
-pub fn init() {
-    // static UDS_STATE is already zeroed via const; nothing to do
-    // for Phase 5a. Hook left for future phases that need to
-    // pre-compute the random seed table.
-    let _ = info!("UDS: init ok (Phase 7: pending queue + 0x78 wired)");
-}
-
-/// True iff a UDS response is ready in the shared buffer
-/// (set by sync handler or by `pending::tick` after a
-/// pending closure completes). canopen_task polls this
-/// after dispatch + tick to decide whether to TX a
-/// response.
+/// True iff a UDS response is ready in the shared buffer.
 pub fn response_ready() -> bool {
-    let state = unsafe { &*(&raw const UDS_STATE) };
-    state.response_pending
+    // Safety: single-threaded.
+    unsafe { (*(&raw const UDS_STATE)).response_pending }
 }
 
 /// Dispatch a UDS request. `request[0]` is the SID. The response
-/// is stored in the shared buffer; the caller (sdo::dispatch)
-/// reads it via `load_response` on the next SDO read of 0x2F00.0.
+/// is stored in the shared buffer; the canopen task reads it
+/// after the dispatch returns (sync case) or after the
+/// pending queue's `tick` (async OTA case).
+///
+/// **Lives in `.data` (RAM).** Called from `uds_transport::
+/// handle_rx_frame` on every UDS request. Keeping the
+/// dispatch chain in RAM means the entire UDS path stays
+/// off the OTA write path.
 ///
 /// **Lives in `.data` (RAM).** Called from `od::write` on every
 /// SDO write to 0x2F00.0. The entire UDS dispatch chain stays
@@ -142,8 +133,6 @@ pub fn dispatch(request: &[u8]) {
         ServiceHandler::CommControl    => comm_control::handle(state, request),
         ServiceHandler::SecurityAccess => security::handle(state, config, request),
         ServiceHandler::RoutineStart   => routine::handle(state, config, request, routine::RoutineSub::Start),
-        ServiceHandler::RoutineStop    => routine::handle(state, config, request, routine::RoutineSub::Stop),
-        ServiceHandler::RoutineResult  => routine::handle(state, config, request, routine::RoutineSub::Result),
         // OTA path (Phase 7): push to pending queue. The
         // closure runs in `pending::tick`. While the work is
         // in-flight, `state.state == SrvState::Pending` and
@@ -161,16 +150,3 @@ pub fn dispatch(request: &[u8]) {
         ServiceHandler::TesterPresent   => tester_present::handle(state, request),
     }
 }
-
-/// Read back the last UDS response. Kept as a free fn for
-/// Phase 6+ callers (e.g. `uds_transport::handle_rx_frame`).
-#[inline(never)]
-#[link_section = ".data"]
-pub fn load_response() -> ([u8; 7], u8) {
-    crate::can::uds::state::load_response()
-}
-
-// `SrvState` re-exported so callers (canopen_task, sdo) can match
-// on the state if needed.
-#[allow(dead_code)]
-pub use state::SrvState as DispatcherState;

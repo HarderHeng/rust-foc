@@ -31,7 +31,7 @@
 
 use super::config::UdsConfig;
 use super::nrc::Nrc;
-use super::state::{load_request, load_response, store_response, UdsState};
+use super::state::{load_response, store_response, UdsState};
 
 /// Maximum number of pending jobs in the queue. 4 covers the OTA
 /// flow (TransferData + TransferExit + 2 waiting).
@@ -157,30 +157,23 @@ pub fn tick(state: &mut UdsState, config: &mut UdsConfig, now_ms: u32) {
     // 5. P2 timeout: push 0x78 if still pending and >P2 elapsed
     if state.state == super::state::SrvState::Pending {
         if now_ms.saturating_sub(state.request_tick_ms) >= config.p2_server_ms {
-            send_response_pending(state, config);
+            send_response_pending(state);
             state.request_tick_ms = now_ms;
         }
     }
 }
 
 /// Push a 0x78 ResponsePending frame into the response buffer.
-/// Caller must check `state.state == SrvState::Pending` first.
-pub fn send_response_pending(state: &mut UdsState, _config: &UdsConfig) {
+/// Reads the in-flight SID from `state.request_buf` (set at
+/// the start of `dispatch`).
+fn send_response_pending(state: &mut UdsState) {
     if state.request_len == 0 {
         return;
     }
-    // 0x78 frame doesn't need the original SID at byte 1 — we
-    // use the SID from the in-flight request (stored in
-    // REQUEST_BUF static, see state.rs).
-    let (req_bytes, req_len) = load_request();
-    if req_len == 0 {
-        return;
-    }
-    let sid = req_bytes[0];
+    let sid = state.request_buf[0];
     let bytes = Nrc::RequestCorrectlyReceivedResponsePending
         .negative_response(sid);
     store_response(&bytes);
-    state.response_pending = true;
 }
 
 /// Caller (canopen_task) checks if a response is ready and

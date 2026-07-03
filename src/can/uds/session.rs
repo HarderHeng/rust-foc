@@ -49,7 +49,7 @@ pub fn handle(state: &mut UdsState, config: &UdsConfig, req: &[u8]) {
     state.session = new_session;
     // ISO 14229: session change invalidates security.
     state.security = SecurityLevel::Locked;
-    state.seed_sent = [false; 3];
+    state.seed_sent = false;
 
     // Fire session-enter callback.
     let cb = match new_session {

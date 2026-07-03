@@ -31,7 +31,7 @@ static SERVICES: &[ServiceEntry] = &[
 
 /// 0xF186 = ActiveDiagSession. Read-only 1-byte value.
 fn read_active_session(out: &mut [u8; 7]) -> Result<usize, Nrc> {
-    out[0] = crate::can::uds::state::load_response_session_byte();
+    out[0] = crate::can::uds::UDS_STATE.session.as_u8();
     Ok(1)
 }
 
@@ -107,7 +107,6 @@ pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     routines_result: ROUTINES_RESULT,
     pending_queue: unsafe { &mut PENDING_QUEUE },
     p2_server_ms: 50,
-    p2_star_ms: 5000,
     key_masks: [0x3000_2212, 0x524C_5E63, 0xA5C3_F11B],
     on_default_session_enter: None,
     on_programming_session_enter: None,
