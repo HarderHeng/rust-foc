@@ -8,7 +8,9 @@ mod control;
 mod drivers;
 mod hal;
 mod metadata;
+mod ota;
 mod tasks;
+mod uds;
 
 use defmt::info;
 use embassy_executor::Spawner;

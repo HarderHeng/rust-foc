@@ -112,8 +112,8 @@ pub fn store_response(payload: &[u8]) -> usize {
     RESPONSE_LEN.store(len as u8, Ordering::Relaxed);
     // Safety: single-threaded executor.
     unsafe {
-        let p = &raw const crate::can::uds::UDS_STATE
-               as *mut crate::can::uds::UdsState;
+        let p = &raw const crate::uds::UDS_STATE
+               as *mut crate::uds::UdsState;
         (*p).response_pending = true;
     }
     len

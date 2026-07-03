@@ -1,16 +1,21 @@
-//! UDS (ISO 14229) module — Phase 5a.
+//! UDS (ISO 14229) — application layer protocol.
+//!
+//! **Layering**: UDS is transport-agnostic. It lives in `src/uds/`
+//! at the top level (NOT under `src/can/`) because the
+//! application layer should not depend on the physical / data
+//! link layer that happens to carry it. The CAN-specific
+//! transport adapter is in `src/uds/transport/can/` — the
+//! only place in the UDS module that imports embassy-stm32's
+//! FDCAN frame types.
 //!
 //! Architecture (see `docs/superpowers/specs/2026-07-03-uds-rewrite-design.md`):
 //!
-//! - Table-driven dispatch: `config.services` maps SID → handler
-//!   with declarative session/SAL gates
-//! - Multi-SAL state machine (SAL1/2/3) with handshake tracking
-//! - LFSR key derivation (SAL-specific masks)
+//! - Table-driven dispatch: `uds_config::SERVICES` maps SID → handler
+//! - SAL1 security with LFSR key derivation (SAL2/3 deferred)
 //! - 23 NRCs (full ISO 14229-1 set we care about)
+//! - Pending queue + 0x78 ResponsePending (Phase 7)
 //!
-//! Phase 5a status: synchronous dispatch (no pending queue /
-//! 0x78 yet — those land in Phase 5c when OTA is rewired).
-//! All 20 existing smoke-test scenarios must continue to pass.
+//! All 33 smoke-test scenarios pass.
 
 use defmt::info;
 
@@ -27,6 +32,8 @@ pub mod security;
 pub mod session;
 pub mod state;
 pub mod tester_present;
+pub mod transport;
+pub mod uds_config;
 pub mod write_data;
 
 use config::{ServiceHandler, UdsConfig};
@@ -36,7 +43,7 @@ use state::{store_response, UdsState};
 pub use pending::{DispatchResult, take_response, tick as tick_pending};
 pub use state::SrvState;
 
-/// Backwards-compat shim for `crate::can::ota::take_reset_request`.
+/// Backwards-compat shim for `crate::ota::take_reset_request`.
 /// Phase 4 used to call `uds::take_reset_request()`; now we re-export
 /// the per-module flag from `reset::take_reset_request`.
 pub use reset::take_reset_request;
@@ -53,7 +60,7 @@ pub fn tx_disabled() -> bool {
 /// every tick. `now_ms` is the current millisecond clock.
 pub fn tick(now_ms: u32) {
     let state = unsafe { &mut *(&raw const UDS_STATE as *mut UdsState) };
-    let config = unsafe { &mut *(&raw mut crate::can::uds_config::UDS_CONFIG) };
+    let config = unsafe { &mut *(&raw mut crate::uds::uds_config::UDS_CONFIG) };
     pending::tick(state, config, now_ms);
 }
 
@@ -86,7 +93,7 @@ pub fn dispatch(request: &[u8]) {
     // by taking the address of a `static`. This is OK because
     // the canopen task is the sole owner of UDS calls.
     let state = unsafe { &mut *(&raw const UDS_STATE as *mut UdsState) };
-    let config: &'static UdsConfig = unsafe { &*(&raw const crate::can::uds_config::UDS_CONFIG) };
+    let config: &'static UdsConfig = unsafe { &*(&raw const crate::uds::uds_config::UDS_CONFIG) };
 
     if request.is_empty() {
         return;
@@ -120,7 +127,7 @@ pub fn dispatch(request: &[u8]) {
     // single-threaded executor, canopen task is the sole
     // owner. Other handlers use the shared `config`.
     let config_mut: &mut UdsConfig = unsafe {
-        &mut *(&raw const crate::can::uds_config::UDS_CONFIG as *mut UdsConfig)
+        &mut *(&raw const crate::uds::uds_config::UDS_CONFIG as *mut UdsConfig)
     };
 
     match entry.handler {

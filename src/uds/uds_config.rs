@@ -3,10 +3,10 @@
 //! To add a new DID or routine, edit this file. No dispatcher
 //! change needed (table-driven dispatch).
 
-use crate::can::uds::config::{
+use crate::uds::config::{
     DidReadEntry, RoutineEntry, ServiceEntry, ServiceHandler, UdsConfig,
 };
-use crate::can::uds::nrc::Nrc;
+use crate::uds::nrc::Nrc;
 
 // Service table. Order is irrelevant (linear search); we group
 // related services for readability.
@@ -31,7 +31,7 @@ static SERVICES: &[ServiceEntry] = &[
 
 /// 0xF186 = ActiveDiagSession. Read-only 1-byte value.
 fn read_active_session(out: &mut [u8; 7]) -> Result<usize, Nrc> {
-    out[0] = crate::can::uds::UDS_STATE.session.as_u8();
+    out[0] = crate::uds::UDS_STATE.session.as_u8();
     Ok(1)
 }
 
@@ -45,11 +45,11 @@ static READ_DIDS: &[DidReadEntry] = &[
 ];
 
 // Write DIDs: none in v1. Phase 5b will add at least one.
-static WRITE_DIDS: &[crate::can::uds::config::DidWriteEntry] = &[];
+static WRITE_DIDS: &[crate::uds::config::DidWriteEntry] = &[];
 
 // Pending queue (Phase 5c). 4 slots covers TransferData +
 // TransferExit + 2 waiting.
-static mut PENDING_QUEUE: [Option<crate::can::uds::pending::PendingJob>; 4]
+static mut PENDING_QUEUE: [Option<crate::uds::pending::PendingJob>; 4]
     = [None, None, None, None];
 
 // RoutineControl (0x31) tables. Phase 5b registers two example

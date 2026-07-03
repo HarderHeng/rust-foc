@@ -8,8 +8,8 @@
 
 use embassy_stm32::can::frame::FdFrame;
 
-use crate::can::uds::state::load_response;
-use crate::can::uds_transport::can_id::response_id_for_request;
+use crate::uds::state::load_response;
+use crate::uds::transport::can_id::response_id_for_request;
 
 /// Maximum bytes per UDS frame. CAN-FD is 64 bytes (vs 8 on
 /// classic CAN). Phase 6 commit 2 uses CAN-FD exclusively

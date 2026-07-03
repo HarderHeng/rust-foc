@@ -108,7 +108,7 @@ pub struct UdsConfig {
     /// because `dispatch` and `tick` need to mutate the slots
     /// and the `Option<PendingJob>` payload contains a
     /// `Box<dyn FnMut>` which isn't `Sync`.
-    pub pending_queue: &'static mut [Option<crate::can::uds::pending::PendingJob>],
+    pub pending_queue: &'static mut [Option<crate::uds::pending::PendingJob>],
 
     /// P2 server timer (ms). When a request stays in
     /// `SrvState::Pending` for longer than this, the

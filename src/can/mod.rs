@@ -23,15 +23,17 @@
 //!
 //! Before Phase 6, UDS was tunneled through CANopen SDO at
 //! 0x2F00.0 (vendor-specific). That coupling is removed:
-//! `src/can/sdo.rs` and the SDO server are deleted. UDS has its
-//! own transport layer (`src/can/uds_transport/`) and its own
-//! CAN-ID routing.
+//! `src/can/sdo.rs` and the SDO server are deleted.
+//!
+//! **Phase 8**: UDS is decoupled from `src/can/` entirely
+//! (it lives in `src/uds/`, a top-level application module).
+//! `src/can/` now only owns bus-level concerns: NMT, heartbeat,
+//! and the FDCAN1 frame I/O. OTA is also application, lives
+//! in `src/ota/`. The transport adapter (`src/uds/transport/`)
+//! is the only thing that knows about FDCAN frames from the
+//! UDS side.
 
 pub mod canopen;
-pub mod ota;
-pub mod uds;
-pub mod uds_config;
-pub mod uds_transport;
 
 use defmt::info;
 use embassy_stm32::{

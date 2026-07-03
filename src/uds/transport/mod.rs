@@ -30,7 +30,7 @@ pub mod frame;
 use embassy_stm32::can::frame::FdFrame;
 use embedded_can::Id;
 
-use super::uds;
+use super::super::uds;
 use frame::build_response_frame;
 
 /// Functional request COB-ID (broadcast, all ECUs).

@@ -1,5 +1,5 @@
 //! 0x34/0x36/0x37 RequestDownload/TransferData/TransferExit
-//! glue. The flash work lives in `super::super::ota`; this
+//! glue. The flash work lives in `crate::ota`; this
 //! module validates the request and pushes the work onto the
 //! pending queue (Phase 7). The continuation runs in
 //! `pending::tick`, and `tick` pushes a 0x78 ResponsePending
@@ -13,7 +13,7 @@
 use super::nrc::Nrc;
 use super::pending::{push_pending, PendingFn, UdsContext};
 use super::state::{store_response, UdsState};
-use crate::can::ota;
+use crate::ota;
 
 pub fn try_queue_request(state: &mut UdsState, config: &mut super::config::UdsConfig) -> bool {
     let req = &state.request_buf[..state.request_len];

@@ -42,9 +42,9 @@ use embassy_futures::select::{select, Either};
 use embassy_stm32::can::{Can, Frame};
 use embassy_time::{Duration, Ticker};
 
-use super::ota;
-use super::uds;
-use super::uds_transport;
+use crate::ota;
+use crate::uds;
+use crate::uds::transport as uds_transport;
 
 /// Heartbeat producer period in milliseconds. Was previously
 /// in `src/can/od.rs` (deleted in Phase 6 along with the
@@ -221,7 +221,7 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
         // continuations and pushes a 0x78 ResponsePending frame
         // if the request has been pending longer than P2.
         // No-op in Phase 5c (no jobs pushed yet).
-        super::uds::tick(embassy_time::Instant::now().elapsed().as_millis() as u32);
+        crate::uds::tick(embassy_time::Instant::now().elapsed().as_millis() as u32);
 
         // Race the heartbeat tick against the next received
         // frame. If a frame arrives, process it (NMT or UDS).
@@ -321,7 +321,7 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
             Either::Second(()) => {
                 // Phase 5c: if 0x28 disableNormalCommunication
                 // is active, skip the heartbeat (TX is muted).
-                if !super::uds::tx_disabled() {
+                if !crate::uds::tx_disabled() {
                     // Same timeout protection as the SDO TX path —
                     // a bus-off heartbeat would otherwise stall the
                     // executor.
