@@ -1,11 +1,24 @@
 # 设计:CAN-based OTA + CANopen + UDS (替换 y-modem bootloader)
 
 **日期:** 2026-07-02
-**状态:** 设计稿(已确认)
+**状态:** ~~设计稿(已确认)~~ **DEPRECATED** — 已被 [`2026-07-03-uds-rewrite-design.md`](./2026-07-03-uds-rewrite-design.md) 取代（Phase 5a/5b/5c 已落地）。
 **目标:** 干掉 y-modem bootloader + USART2 上的 ota_update,把所有 OTA 接口完全放在 FDCAN1 (PB9 TX, PA11 RX);加简单 CANopen + UDS。
 **范围澄清:** **shell 仍然走 USART2 (PB3/PB4),不动**。FDCAN1 仅供 OTA 协议栈使用。
 
 **预估:** 多 phase 交付,每 phase 1-3 个 commit。
+
+---
+
+> **DELETED-BY-2026-07-03**:本文档描述 Phase 1-4 的 wire format 设计（8 个 UDS SID、2 字节/帧的 OTA、固定 seed/key、SDO 7 字节 ceiling）。**所有这些已经被 Phase 5 重写**：
+>
+> - 模块结构：`src/can/uds.rs`（510 行）→ `src/can/uds/`（15 个文件，表驱动分发）
+> - SID 数：8 → 14（加 0x28 CommControl + 0x31 RoutineControl + 0x78 ResponsePending 机制）
+> - 密钥：固定 0xA5A5A5A5 / 0xA5A5B7D9 → LFSR(0xA5A5A5A5, 0x30002212) = 0x497DFE82
+> - NRC：8 个 → 23 个
+> - SAL：1 级 → 3 级（SAL1/2/3 独立 key_masks）
+> - 加 0x28 0x03 disableNormalCommunication、Pending queue、take_response 协议
+>
+> 新设计文档：[`2026-07-03-uds-rewrite-design.md`](./2026-07-03-uds-rewrite-design.md)（1556 行，3 轮自审）。本文档保留作为历史参考。
 
 ---
 

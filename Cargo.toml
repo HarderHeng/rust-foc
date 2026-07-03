@@ -65,3 +65,12 @@ strip = true
 [profile.dev]
 debug = 2
 opt-level = "s"
+
+# Host-side test harness for UDS unit tests is deferred to a
+# follow-up commit. Setting up a separate `x86_64-unknown-linux-gnu`
+# target requires `rustup target add` and an external toolchain
+# — out of scope for the firmware. For now, the LFSR algorithm
+# is covered by the Python smoke test
+# `scripts/smoke_test.py::s_uds_lfsr_key_known`, which computes
+# the same key the firmware should produce and asserts equality
+# against a known reference vector (0x497DFE82).

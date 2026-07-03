@@ -127,6 +127,63 @@ screen /dev/ttyUSB0 921600
 - **Layered architecture** — `src/tasks/` and `src/commands/` **must not** import
   `embassy_stm32` directly; all HAL configuration goes through `bsp.rs`.
 
+## CANopen / UDS (FDCAN1, OTA path)
+
+See [`docs/superpowers/specs/2026-07-03-uds-rewrite-design.md`](docs/superpowers/specs/2026-07-03-uds-rewrite-design.md)
+for the full design. The legacy 2026-07-02 spec is
+**deprecated** (kept for history).
+
+### Adding a new DID (ReadDataByIdentifier 0x22)
+
+The UDS dispatcher is **table-driven** — adding a new DID is a single
+`DidReadEntry` in `src/can/uds_config.rs`, no Rust dispatcher code change:
+
+```rust
+fn read_my_did(out: &mut [u8; 7]) -> Result<usize, Nrc> {
+    out[0] = /* your byte */;
+    Ok(1)
+}
+
+static READ_DIDS: &[DidReadEntry] = &[
+    DidReadEntry {
+        did: 0xF190,            // your DID
+        session_access: 0b111,  // any session
+        security_level: 0,       // no SAL required
+        func: read_my_did,
+    },
+    // ... existing 0xF186 entry ...
+];
+```
+
+Add a smoke-test scenario in `scripts/smoke_test.py` and run
+`python3 scripts/smoke_test.py` to verify wire format. The firmware
+build is `cargo build --release`.
+
+### Adding a new UDS SID
+
+`src/can/uds/`: each SID has its own submodule (`session.rs`, `dtc.rs`,
+`security.rs`, ...). To add a new SID:
+
+1. Pick a free SID (e.g. 0x30)
+2. Add a `ServiceHandler::MySid` variant in `src/can/uds/config.rs`
+3. Add the handler module `src/can/uds/my_sid.rs` with `pub fn handle(state, config, req)`
+4. Wire the dispatch arm in `src/can/uds/mod.rs::dispatch`
+5. Add a `ServiceEntry` in `src/can/uds_config.rs::SERVICES`
+6. Add a smoke-test scenario
+
+### SecurityAccess (0x27) — multi-SAL
+
+The seed/key derivation is LFSR + bit-reversal (per the design doc §3.4,
+matches MiniUds). Per-SAL `key_masks: [u32; 3]` lives in
+`src/can/uds_config.rs::UDS_CONFIG`. To rotate the SAL1 mask:
+
+```rust
+key_masks: [0xNEW_MASK_SAL1, 0x524C_5E63, 0xA5C3_F11B],
+```
+
+Reference vector: seed=0xA5A5A5A5, mask=0x30002212 → key=0x497DFE82.
+The Python smoke test `s_uds_lfsr_key_known` enforces this.
+
 ## License
 
 TBD

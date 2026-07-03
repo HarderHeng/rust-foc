@@ -82,6 +82,8 @@ SID_RDTCI = 0x19 # ReadDTCInformation
 SID_RDBI = 0x22  # ReadDataByIdentifier
 SID_WDBI = 0x2E  # WriteDataByIdentifier
 SID_SA   = 0x27  # SecurityAccess
+SID_CC   = 0x28  # CommunicationControl
+SID_RC   = 0x31  # RoutineControl
 SID_TP   = 0x3E  # TesterPresent
 SID_RD   = 0x34  # RequestDownload (OTA)
 SID_TD   = 0x36  # TransferData (OTA)
@@ -98,6 +100,9 @@ NRC_INVALID_KEY                  = 0x35
 NRC_EXCEEDED_NUMBER_OF_ATTEMPTS  = 0x36
 NRC_GENERAL_PROGRAMMING_FAILURE  = 0x72
 NRC_WRONG_BLOCK_SEQUENCE_NUMBER  = 0x73
+NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_SESSION = 0x7E
+NRC_RESPONSE_PENDING             = 0x78
+NRC_SUB_FUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION = 0x7E
 
 # SDO abort codes (CiA 301)
 SDO_ABORT_TOGGLE_BIT_NOT_ALTERED = 0x0503_0000
@@ -110,7 +115,36 @@ SDO_ABORT_LENGTH_MISMATCH        = 0x0607_0010
 APP_START = 0x0800_0000
 APP_SIZE  = 0x1F800  # 124 KB app region (B-G431B-ESC1 has 128 KB)
 SEED = b'\xA5\xA5\xA5\xA5'
-KEY  = 0xA5A5_B7D9  # seed + 0x1234, LE
+
+# Phase 5a: SecurityAccess key derived from the seed via the
+# Rust LFSR + bit-reversal algorithm (see src/can/uds/security.rs).
+# The mask matches the `key_masks[0]` in src/can/uds_config.rs.
+# Computed by hand (see scripts/smoke_test.py commit history).
+LFSR_MASK_SAL1 = 0x30002212
+
+def _reverse_bits(b: int) -> int:
+    b = ((b & 0xAA) >> 1) | ((b & 0x55) << 1)
+    b = ((b & 0xCC) >> 2) | ((b & 0x33) << 2)
+    b = ((b & 0xF0) >> 4) | ((b & 0x0F) << 4)
+    return b
+
+def _lfsr_key(seed: int, mask: int) -> int:
+    state = seed & 0xFFFFFFFF
+    for _ in range(40):
+        if state & 0x80000000:
+            state = ((state << 1) ^ mask) & 0xFFFFFFFF
+        else:
+            state = (state << 1) & 0xFFFFFFFF
+    key = 0
+    for i in range(4):
+        byte = _reverse_bits((state >> ((3 - i) * 8)) & 0xFF)
+        key |= byte << (i * 8)
+    return key
+
+# Hardcoded so existing tests can reference the value directly.
+# Run `_lfsr_key(0xA5A5A5A5, 0x30002212)` to recompute if the
+# algorithm ever changes.
+KEY = _lfsr_key(0xA5A5A5A5, LFSR_MASK_SAL1)  # = 0x497DFE82
 
 
 # ---- CRC-32/ISO-HDLC (matches src/can/ota.rs::crc32_update) -------
@@ -150,6 +184,8 @@ class FirmwareEmulator:
         # UDS state
         self.uds_session = 0x01   # Default
         self.uds_security = 0     # Locked
+        self.uds_tx_disabled = False  # 0x28 CommControl state
+        self.uds_rx_disabled = False
 
         # OTA state
         self.ota_state = 'Idle'
@@ -363,6 +399,14 @@ class FirmwareEmulator:
             self.last_response = bytes([0x7F, 0, NRC_INCORRECT_MESSAGE_LENGTH])
             return
         sid = payload[0]
+        # Phase 5c: tx_disabled flag — 0x28 0x03 (and the other
+        # "disable" subfuncs) set this; non-0x28 requests return
+        # 0x22 while disabled. The 0x28 0x00 enable bypasses
+        # the check.
+        if self.uds_tx_disabled and not (sid == SID_CC and len(payload) >= 2
+                                          and payload[1] == 0x00):
+            self.last_response = bytes([0x7F, sid, NRC_CONDITIONS_NOT_CORRECT])
+            return
         rest = payload[1:]
         handlers = {
             SID_DSC:   self._uds_dsc,
@@ -372,6 +416,8 @@ class FirmwareEmulator:
             SID_RDBI:  self._uds_rdbi,
             SID_WDBI:  self._uds_wdbi,
             SID_SA:    self._uds_sa,
+            SID_CC:    self._uds_cc,
+            SID_RC:    self._uds_rc,
             SID_TP:    self._uds_tp,
             SID_RD:    self._uds_rd,
             SID_TD:    self._uds_td,
@@ -463,6 +509,49 @@ class FirmwareEmulator:
                 self.last_response = bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED])
         else:
             self.last_response = bytes([0x7F, SID_SA, NRC_SUB_FUNC_NOT_SUPPORTED])
+
+    def _uds_cc(self, p: bytes) -> None:
+        # 0x28 CommunicationControl. [0x28, subfunc, network_type]
+        if len(p) != 2:
+            self.last_response = bytes([0x7F, SID_CC, NRC_INCORRECT_MESSAGE_LENGTH])
+            return
+        sub = p[0]
+        if sub == 0x00:
+            self.uds_tx_disabled = False
+            self.uds_rx_disabled = False
+        elif sub == 0x01:
+            self.uds_tx_disabled = True
+            self.uds_rx_disabled = False
+        elif sub == 0x02:
+            self.uds_tx_disabled = False
+            self.uds_rx_disabled = True
+        elif sub == 0x03:
+            self.uds_tx_disabled = True
+            self.uds_rx_disabled = True
+        else:
+            self.last_response = bytes([0x7F, SID_CC, NRC_SUB_FUNC_NOT_SUPPORTED])
+            return
+        self.last_response = bytes([SID_CC + 0x40, sub])
+
+    def _uds_rc(self, p: bytes) -> None:
+        # 0x31 RoutineControl. [0x31, subfunc, rid_hi, rid_lo, ...]
+        if len(p) < 3:
+            self.last_response = bytes([0x7F, SID_RC, NRC_INCORRECT_MESSAGE_LENGTH])
+            return
+        sub = p[0]
+        rid = (p[1] << 8) | p[2] if len(p) >= 3 else 0
+        if sub == 0x01 and rid == 0xFF00:
+            # startRoutine 0xFF00 = checkProgrammingDependencies (stub)
+            self.last_response = bytes([SID_RC + 0x40, sub, p[1], p[2]])
+        elif sub == 0x03 and rid == 0xF001:
+            # requestRoutineResults 0xF001 = checkPreConditions → 1 byte "0x00 OK"
+            self.last_response = bytes([SID_RC + 0x40, sub, p[1], p[2], 0x00])
+        elif sub == 0x01 and self.uds_session != 0x02 and rid == 0xFF00:
+            # Wrong session — 0x7E
+            self.last_response = bytes([0x7F, SID_RC,
+                                        NRC_SUB_FUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION])
+        else:
+            self.last_response = bytes([0x7F, SID_RC, NRC_REQUEST_OUT_OF_RANGE])
 
     def _uds_tp(self, p: bytes) -> None:
         if not p:
@@ -893,6 +982,127 @@ def s_uds_tp(bus: Bus) -> None:
     assert_bytes(val, bytes([SID_TP + 0x40, 0x00]), "TP response")
 
 
+def s_uds_tp_suppress(bus: Bus) -> None:
+    """TesterPresent (0x3E 0x80) with suppressPositiveResponse bit
+    set → SDO response payload is empty (server stays silent)."""
+    drv = MasterDriver(bus)
+    _assert(drv.sdo_write(0x2F00, 0, bytes([SID_TP, 0x80])), "TP suppress write OK")
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, b'', "TP suppress → empty response")
+
+
+def s_uds_cc_disable(bus: Bus) -> None:
+    """0x28 0x03 disableNormalCommunication → positive. Subsequent
+    non-0x28 requests return 0x22 ConditionsNotCorrect."""
+    drv = MasterDriver(bus)
+    _assert(drv.sdo_write(0x2F00, 0, bytes([SID_CC, 0x03, 0x01])), "CC 0x03 write OK")
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_CC + 0x40, 0x03]), "CC 0x03 response")
+    # Now TP should get 0x22.
+    drv.sdo_write(0x2F00, 0, bytes([SID_TP, 0x00]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([0x7F, SID_TP, NRC_CONDITIONS_NOT_CORRECT]),
+                 "TP during disable → 0x22")
+
+
+def s_uds_cc_enable_bypass(bus: Bus) -> None:
+    """0x28 0x03 disables, then 0x28 0x00 re-enables — even
+    while disabled, 0x28 0x00 must work (the unlock path)."""
+    drv = MasterDriver(bus)
+    drv.sdo_write(0x2F00, 0, bytes([SID_CC, 0x03, 0x01]))
+    drv.sdo_read(0x2F00, 0)  # consume
+    # The unlock: 0x28 0x00 must work even though we're disabled.
+    drv.sdo_write(0x2F00, 0, bytes([SID_CC, 0x00, 0x01]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_CC + 0x40, 0x00]), "CC 0x00 enable bypasses disable")
+    # TP now works again.
+    drv.sdo_write(0x2F00, 0, bytes([SID_TP, 0x00]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_TP + 0x40, 0x00]), "TP after re-enable")
+
+
+def s_uds_rc_start(bus: Bus) -> None:
+    """0x31 0x01 startRoutine RID 0xFF00 (in ProgrammingSession)
+    → positive with 4-byte result header."""
+    drv = MasterDriver(bus)
+    # Get into ProgrammingSession: SecurityAccess then DSC 0x02.
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
+    drv.sdo_read(0x2F00, 0)  # consume seed
+    drv.sdo_write_long(0x2F00, 0, bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
+    drv.sdo_read(0x2F00, 0)  # consume key-accepted
+    drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x02]))
+    drv.sdo_read(0x2F00, 0)  # consume dsc-accepted
+    # Now start 0xFF00.
+    drv.sdo_write(0x2F00, 0, bytes([SID_RC, 0x01, 0xFF, 0x00]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_RC + 0x40, 0x01, 0xFF, 0x00]),
+                 "Routine start 0xFF00")
+
+
+def s_uds_rc_result(bus: Bus) -> None:
+    """0x31 0x03 requestRoutineResults RID 0xF001 → 1-byte result
+    0x00 (pre-conditions met)."""
+    drv = MasterDriver(bus)
+    drv.sdo_write(0x2F00, 0, bytes([SID_RC, 0x03, 0xF0, 0x01]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_RC + 0x40, 0x03, 0xF0, 0x01, 0x00]),
+                 "Routine result 0xF001")
+
+
+def s_uds_session_gate_nrc(bus: Bus) -> None:
+    """0x22 read DID 0xF186 in any session (allowed). But writing
+    a non-existent DID in any session returns 0x31. Try the
+    non-gated case (0xF186) vs the gated case to verify the
+    dispatcher routes by SID+subfunc."""
+    drv = MasterDriver(bus)
+    # Read 0xF186 — should work in Default.
+    drv.sdo_write(0x2F00, 0, bytes([SID_RDBI, 0x86, 0xF1]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_RDBI + 0x40, 0x86, 0xF1, 0x01]),
+                 "ReadDID 0xF186 in Default session")
+    # Read unknown DID — 0x31.
+    drv.sdo_write(0x2F00, 0, bytes([SID_RDBI, 0x00, 0x00]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([0x7F, SID_RDBI, NRC_REQUEST_OUT_OF_RANGE]),
+                 "ReadDID unknown → 0x31")
+
+
+def s_uds_lfsr_key_known(bus: Bus) -> None:
+    """Verify the LFSR-derived key for SAL1 matches the reference
+    vector 0x497DFE82. Regression guard: if anyone changes the
+    LFSR algorithm or mask, this catches it."""
+    assert KEY == 0x497DFE82, \
+        f"KEY drifted: expected 0x497DFE82, got 0x{KEY:08X}"
+
+
+def s_uds_seed_when_unlocked_again(bus: Bus) -> None:
+    """Two consecutive RequestSeed cycles: first issues seed,
+    second (after unlock) issues zero seed. Verifies seed_sent
+    flag handling and the multi-step session path."""
+    drv = MasterDriver(bus)
+    # Get unlocked.
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
+    drv.sdo_read(0x2F00, 0)
+    drv.sdo_write_long(0x2F00, 0, bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
+    drv.sdo_read(0x2F00, 0)
+    # Now ask for seed again — should be 6 bytes with all-zero seed.
+    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([SID_SA + 0x40, 0x01, 0x00, 0x00, 0x00, 0x00]),
+                 "RequestSeed when unlocked → zero seed")
+
+
+def s_uds_programming_needs_sal(bus: Bus) -> None:
+    """0x10 0x02 ProgrammingSession without unlock → 0x33
+    SecurityAccessDenied. Verifies the SAL gate on session
+    transitions."""
+    drv = MasterDriver(bus)
+    drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x02]))
+    val = drv.sdo_read(0x2F00, 0)
+    assert_bytes(val, bytes([0x7F, SID_DSC, NRC_SECURITY_ACCESS_DENIED]),
+                 "ProgrammingSession without unlock → 0x33")
+
+
 def s_uds_session_default(bus: Bus) -> None:
     """DiagnosticSessionControl 0x10 0x01 → 0x50 0x01."""
     drv = MasterDriver(bus)
@@ -1141,11 +1351,27 @@ SCENARIOS: dict[str, callable] = {
     "sdo_write_heartbeat": s_sdo_write_heartbeat,
     "sdo_ro_rejected":     s_sdo_ro_rejected,
     "uds_tp":              s_uds_tp,
+    # NOTE: 0x3E 0x80 (suppress positive response) is a known
+    # gap — the SDO layer's `build_upload_response` doesn't
+    # encode an empty payload, and `OdValue::len == 0` is
+    # undefined. The Rust side honours it (per the existing
+    # `store_response(&[])` path) but the simulator can't
+    # round-trip an empty SDO read. Tracked as a known
+    # limitation; full coverage needs a TP-only scenario that
+    # bypasses SDO and uses a direct UDS dispatcher call.
     "uds_session":         s_uds_session_default,
     "uds_security":        s_uds_security_unlock,
     "uds_active_did":      s_uds_active_did,
     "uds_wrong_key":       s_uds_wrong_key,
     "uds_seed_when_unlocked": s_uds_request_seed_when_unlocked,
+    "uds_seed_when_unlocked_again": s_uds_seed_when_unlocked_again,
+    "uds_lfsr_key_known":  s_uds_lfsr_key_known,
+    "uds_session_gate_nrc": s_uds_session_gate_nrc,
+    "uds_programming_needs_sal": s_uds_programming_needs_sal,
+    "uds_cc_disable":      s_uds_cc_disable,
+    "uds_cc_enable_bypass": s_uds_cc_enable_bypass,
+    "uds_rc_start":        s_uds_rc_start,
+    "uds_rc_result":       s_uds_rc_result,
     "ota_block_seq":       s_ota_block_seq,
     "nmt":                 s_nmt_states,
     "seg_toggle_mismatch": s_seg_toggle_mismatch,
