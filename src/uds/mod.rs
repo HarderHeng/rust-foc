@@ -4,69 +4,68 @@
 //! at the top level (NOT under `src/can/`) because the
 //! application layer should not depend on the physical / data
 //! link layer that happens to carry it. The CAN-specific
-//! transport adapter is in `src/uds/transport/can/` — the
-//! only place in the UDS module that imports embassy-stm32's
+//! transport adapter is in `src/uds/transport.rs` — the only
+//! place in the UDS module that imports embassy-stm32's
 //! FDCAN frame types.
 //!
-//! Architecture (see `docs/superpowers/specs/2026-07-03-uds-rewrite-design.md`):
+//! ## Module map
 //!
-//! - Table-driven dispatch: `uds_config::SERVICES` maps SID → handler
-//! - SAL1 security with LFSR key derivation (SAL2/3 deferred)
-//! - 23 NRCs (full ISO 14229-1 set we care about)
-//! - Pending queue + 0x78 ResponsePending (Phase 7)
+//! - `types.rs`        — protocol enums (Session, SecurityLevel, SrvState, Nrc)
+//! - `state.rs`        — engine runtime state + shared response buffer
+//! - `table.rs`        — `UdsConfig` schema + `impl UdsConfig { dispatch_0xNN }`
+//!                       (the *only* place that knows per-SID wire format)
+//! - `static_config.rs`— the static `UDS_CONFIG` instance + callback fns
+//! - `crypto.rs`       — LFSR + bit reversal (pure functions, unit-tested)
+//! - `pending.rs`      — pending queue + 0x78 ResponsePending
+//! - `transport.rs`    — CAN-specific transport adapter
 //!
-//! All 33 smoke-test scenarios pass.
+//! ## Adding a new SID
+//!
+//! 1. Add `dispatch_0xNN` method in `table.rs::impl UdsConfig`.
+//! 2. Add `ServiceHandler::YourSid` variant in `table.rs`.
+//! 3. Add a `ServiceEntry` row in `static_config.rs::SERVICES`.
+//!    Add the dispatch arm in the `route` function in this file.
+//!
+//! ## Adding a new DID callback
+//!
+//! 1. Write the callback fn in `static_config.rs`.
+//! 2. Add a `DidReadEntry` row in `static_config.rs::READ_DIDS`.
+//!    Nothing else moves.
 
 use defmt::info;
 
-pub mod comm_control;
-pub mod config;
-pub mod download;
-pub mod dtc;
-pub mod nrc;
+pub mod crypto;
 pub mod pending;
-pub mod read_data;
-pub mod reset;
-pub mod routine;
-pub mod security;
-pub mod session;
 pub mod state;
-pub mod tester_present;
+pub mod static_config;
+pub mod table;
 pub mod transport;
-pub mod uds_config;
-pub mod write_data;
+pub mod types;
 
-use config::{ServiceHandler, UdsConfig};
-use nrc::Nrc;
 use state::{store_response, UdsState};
+pub use table::{take_reset_request, take_reset_subfunc, UdsConfig};
+use types::Nrc;
 
-pub use pending::{DispatchResult, take_response, tick as tick_pending};
-pub use state::SrvState;
-
-/// Backwards-compat shim for `crate::ota::take_reset_request`.
-/// Phase 4 used to call `uds::take_reset_request()`; now we re-export
-/// the per-module flag from `reset::take_reset_request`.
-pub use reset::take_reset_request;
-pub use reset::take_reset_subfunc;
+/// Top-level UDS state. `static` so it's a single instance.
+pub static UDS_STATE: UdsState = UdsState::zeroed();
 
 /// Public helper: returns true if the canopen task should
-/// suppress its proactive frames (heartbeat, NMT ACK) because
-/// the master has issued 0x28 0x03 disableNormalCommunication.
+/// suppress its proactive frames (heartbeat, NMT ACK,
+/// UDS responses) because the master issued
+/// 0x28 0x03 disableNormalCommunication.
 pub fn tx_disabled() -> bool {
     // Safety: single-threaded executor.
     unsafe { (&*(&raw const UDS_STATE)).tx_disabled }
 }
 
-/// Public helper: drive the pending queue. Called by canopen_task
-/// every tick. `now_ms` is the current millisecond clock.
+/// Public helper: drive the pending queue. Called by
+/// canopen_task every tick. `now_ms` is the current
+/// millisecond clock.
 pub fn tick(now_ms: u32) {
     let state = unsafe { &mut *(&raw const UDS_STATE as *mut UdsState) };
-    let config = unsafe { &mut *(&raw mut crate::uds::uds_config::UDS_CONFIG) };
+    let config = unsafe { &mut *(&raw const static_config::UDS_CONFIG as *mut UdsConfig) };
     pending::tick(state, config, now_ms);
 }
-
-/// Top-level UDS state. `static` so it's a single instance.
-pub static UDS_STATE: UdsState = UdsState::zeroed();
 
 /// True iff a UDS response is ready in the shared buffer.
 pub fn response_ready() -> bool {
@@ -74,27 +73,27 @@ pub fn response_ready() -> bool {
     unsafe { (*(&raw const UDS_STATE)).response_pending }
 }
 
-/// Dispatch a UDS request. `request[0]` is the SID. The response
-/// is stored in the shared buffer; the canopen task reads it
-/// after the dispatch returns (sync case) or after the
-/// pending queue's `tick` (async OTA case).
+/// Dispatch a UDS request. `request[0]` is the SID. The
+/// response is stored in the shared buffer; the canopen task
+/// reads it after the dispatch returns (sync case) or after
+/// the pending queue's `tick` (async OTA case).
 ///
-/// **Lives in `.data` (RAM).** Called from `uds_transport::
-/// handle_rx_frame` on every UDS request. Keeping the
-/// dispatch chain in RAM means the entire UDS path stays
-/// off the OTA write path.
-///
-/// **Lives in `.data` (RAM).** Called from `od::write` on every
-/// SDO write to 0x2F00.0. The entire UDS dispatch chain stays
+/// **Lives in `.data` (RAM).** Called from
+/// `transport::handle_rx_frame` on every UDS request. Keeping
+/// the dispatch chain in RAM means the entire UDS path stays
 /// off the OTA write path.
 #[inline(never)]
 #[link_section = ".data"]
 pub fn dispatch(request: &[u8]) {
-    // Safety: single-threaded executor; we get `&mut UDS_STATE`
-    // by taking the address of a `static`. This is OK because
-    // the canopen task is the sole owner of UDS calls.
     let state = unsafe { &mut *(&raw const UDS_STATE as *mut UdsState) };
-    let config: &'static UdsConfig = unsafe { &*(&raw const crate::uds::uds_config::UDS_CONFIG) };
+
+    // Single `&mut` reference to UDS_CONFIG — Rust reborrows as
+    // `&` for `&self` dispatch methods and as `&mut` for the OTA
+    // methods that push to the pending queue. Single-threaded
+    // executor is the sole owner.
+    let config: &mut UdsConfig = unsafe {
+        &mut *(&raw const static_config::UDS_CONFIG as *mut UdsConfig)
+    };
 
     if request.is_empty() {
         return;
@@ -108,12 +107,12 @@ pub fn dispatch(request: &[u8]) {
         }
     };
 
-    if !config::session_allowed(state.session, entry.session_access) {
+    if !table::session_allowed(state.session, entry.session_access) {
         store_response(&Nrc::ServiceNotSupportedInActiveSession
             .negative_response(sid));
         return;
     }
-    if !config::security_allowed(state.security, entry.security_level) {
+    if !table::security_allowed(state.security, entry.security_level) {
         store_response(&Nrc::SecurityAccessDenied.negative_response(sid));
         return;
     }
@@ -123,38 +122,33 @@ pub fn dispatch(request: &[u8]) {
     state.request_len = request.len();
     state.request_buf[..request.len()].copy_from_slice(request);
 
-    // OTA path needs `&mut UdsConfig` (to push onto the
-    // pending queue). Take a mut pointer through unsafe —
-    // single-threaded executor, canopen task is the sole
-    // owner. Other handlers use the shared `config`.
-    let config_mut: &mut UdsConfig = unsafe {
-        &mut *(&raw const crate::uds::uds_config::UDS_CONFIG as *mut UdsConfig)
-    };
-
     match entry.handler {
-        ServiceHandler::Session        => session::handle(state, config, request),
-        ServiceHandler::EcuReset       => reset::handle(state, request),
-        ServiceHandler::ClearDtc       => dtc::handle_clear(state, request),
-        ServiceHandler::ReadDtc        => dtc::handle_read(state, request),
-        ServiceHandler::ReadDataById   => read_data::handle(state, config, request),
-        ServiceHandler::WriteDataById  => write_data::handle(state, config, request),
-        ServiceHandler::CommControl    => comm_control::handle(state, request),
-        ServiceHandler::SecurityAccess => security::handle(state, config, request),
-        ServiceHandler::RoutineStart   => routine::handle(state, config, request, routine::RoutineSub::Start),
+        table::ServiceHandler::Session        => config.dispatch_0x10(state, request),
+        table::ServiceHandler::EcuReset       => config.dispatch_0x11(state, request),
+        table::ServiceHandler::ClearDtc       => config.dispatch_0x14(state, request),
+        table::ServiceHandler::ReadDtc        => config.dispatch_0x19(state, request),
+        table::ServiceHandler::ReadDataById   => config.dispatch_0x22(state, request),
+        table::ServiceHandler::WriteDataById  => config.dispatch_0x2e(state, request),
+        table::ServiceHandler::CommControl    => config.dispatch_0x28(state, request),
+        table::ServiceHandler::SecurityAccess => config.dispatch_0x27(state, request),
+        table::ServiceHandler::RoutineStart   => config.dispatch_0x31(state, request, table::RoutineSub::Start),
+        table::ServiceHandler::RoutineStop    => config.dispatch_0x31(state, request, table::RoutineSub::Stop),
+        table::ServiceHandler::RoutineResult  => config.dispatch_0x31(state, request, table::RoutineSub::Result),
         // OTA path (Phase 7): push to pending queue. The
         // closure runs in `pending::tick`. While the work is
         // in-flight, `state.state == SrvState::Pending` and
         // subsequent dispatches return `DispatchResult::Pending`
         // (master should back off and poll later).
-        ServiceHandler::RequestDownload => {
-            let _queued = download::try_queue_request(state, config_mut);
+        table::ServiceHandler::RequestDownload => {
+            let _queued = config.dispatch_0x34(state);
         }
-        ServiceHandler::TransferData => {
-            let _queued = download::try_queue_transfer(state, config_mut);
+        table::ServiceHandler::TransferData => {
+            let _queued = config.dispatch_0x36(state);
         }
-        ServiceHandler::TransferExit => {
-            let _queued = download::try_queue_exit(state, config_mut);
+        table::ServiceHandler::TransferExit => {
+            let _queued = config.dispatch_0x37(state);
         }
-        ServiceHandler::TesterPresent   => tester_present::handle(state, request),
+        table::ServiceHandler::TesterPresent   => config.dispatch_0x3e(state, request),
     }
+    info!("UDS: dispatched SID 0x{:02x}", sid);
 }

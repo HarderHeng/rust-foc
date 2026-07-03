@@ -1,18 +1,25 @@
-//! Static UDS configuration. Single instance lives here.
+//! Static `UdsConfig` instance + the callback functions
+//! referenced by the table entries.
 //!
-//! To add a new DID or routine, edit this file. No dispatcher
-//! change needed (table-driven dispatch).
+//! To add a new DID: add a callback fn here + a `DidReadEntry`
+//! row in `READ_DIDS`. To add a new routine: same pattern in
+//! `ROUTINES_START` / `_STOP` / `_RESULT`. To add a new SID:
+//! add a `ServiceEntry` row in `SERVICES` (and a
+//! `dispatch_0xNN` method in `table.rs`).
+//!
+//! The pending queue is `static mut` because `Option<PendingJob>`
+//! holds a closure (not `Sync`); the `unsafe` is required at
+//! the static initializer.
 
-use crate::uds::config::{
-    DidReadEntry, RoutineEntry, ServiceEntry, ServiceHandler, UdsConfig,
-};
-use crate::uds::nrc::Nrc;
+use crate::uds::table::{DidReadEntry, DidWriteEntry, RoutineEntry,
+                          ServiceEntry, ServiceHandler, UdsConfig};
+use crate::uds::types::{Nrc, Session};
 
 // Service table. Order is irrelevant (linear search); we group
 // related services for readability.
 static SERVICES: &[ServiceEntry] = &[
     ServiceEntry::new(0x10, 0b111, 0, ServiceHandler::Session),
-    ServiceEntry::new(0x11, 0b011, 0, ServiceHandler::EcuReset),
+    ServiceEntry::new(0x11, 0b111, 0, ServiceHandler::EcuReset),
     ServiceEntry::new(0x14, 0b111, 0, ServiceHandler::ClearDtc),
     ServiceEntry::new(0x19, 0b111, 0, ServiceHandler::ReadDtc),
     ServiceEntry::new(0x22, 0b111, 0, ServiceHandler::ReadDataById),
@@ -26,8 +33,7 @@ static SERVICES: &[ServiceEntry] = &[
     ServiceEntry::new(0x3E, 0b111, 0, ServiceHandler::TesterPresent),
 ];
 
-// DID tables. Adding a DID = adding a single entry here; the
-// dispatcher's `find` call picks it up.
+// ---- DID read callbacks --------------------------------------------------
 
 /// 0xF186 = ActiveDiagSession. Read-only 1-byte value.
 fn read_active_session(out: &mut [u8; 7]) -> Result<usize, Nrc> {
@@ -44,29 +50,29 @@ static READ_DIDS: &[DidReadEntry] = &[
     },
 ];
 
-// Write DIDs: none in v1. Phase 5b will add at least one.
-static WRITE_DIDS: &[crate::uds::config::DidWriteEntry] = &[];
+// Write DIDs: none in v1.
+static WRITE_DIDS: &[DidWriteEntry] = &[];
 
-// Pending queue (Phase 5c). 4 slots covers TransferData +
-// TransferExit + 2 waiting.
+// ---- Pending queue -------------------------------------------------------
+
+// 4 slots covers TransferData + TransferExit + 2 waiting.
 static mut PENDING_QUEUE: [Option<crate::uds::pending::PendingJob>; 4]
     = [None, None, None, None];
 
-// RoutineControl (0x31) tables. Phase 5b registers two example
-// routines with stub callbacks (real OTA wiring is Phase 5c).
-//
-// 0xFF00 = checkProgrammingDependencies (per ISO 14229 / UDS on
-//          CAN, used at the start of every flash session).
-// 0xF001 = checkProgrammingPreConditions (an OBC-specific
-//          vendor check we can add later).
+// ---- Routine callbacks ---------------------------------------------------
 
 fn routine_noop(_req: &[u8], _resp: &mut [u8]) -> Result<usize, Nrc> { Ok(0) }
+
 fn routine_check_pre(_req: &[u8], resp: &mut [u8]) -> Result<usize, Nrc> {
     // 1-byte response: 0x00 = "pre-conditions met".
     resp[0] = 0x00;
     Ok(1)
 }
 
+// 0xFF00 = checkProgrammingDependencies (per ISO 14229 / UDS
+//          on CAN, used at the start of every flash session).
+// 0xF001 = checkProgrammingPreConditions (vendor check; the
+//          default callback in our test rig returns 0x00).
 static ROUTINES_START: &[RoutineEntry] = &[
     RoutineEntry {
         rid: 0xFF00,
@@ -92,12 +98,13 @@ static ROUTINES_RESULT: &[RoutineEntry] = &[
     },
 ];
 
-// LFSR masks per SAL. Phase 5a uses a single hardcoded mask; the
-// other slots are placeholders. To compute: pick any non-zero
-// 32-bit value; the LFSR cycle is then unique to that mask.
-// The Phase 5a smoke test expects the existing seed/key pair
-// (seed 0xA5A5A5A5 → key 0xA5A5B7D9); the test was updated in 5d
-// to derive the key from this mask.
+// ---- The single static instance -----------------------------------------
+
+/// LFSR masks per SAL. Index 0/1/2 = SAL1/2/3. Pick any
+/// non-zero 32-bit value; the LFSR cycle is then unique to
+/// that mask. The smoke tests expect the existing seed/key
+/// pairs derived from these masks — see
+/// `scripts/smoke_test.py::_lfsr_key`.
 pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     services: SERVICES,
     read_dids: READ_DIDS,
@@ -112,3 +119,6 @@ pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     on_programming_session_enter: None,
     on_extended_session_enter: None,
 };
+
+#[allow(dead_code)]
+fn _silence_unused(_s: &Session) {}

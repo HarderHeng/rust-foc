@@ -1,58 +1,16 @@
-//! UDS runtime state — RAM-resident so the OTA write path
-//! stays off the flash-resident call chain (see `super`).
+//! UDS engine runtime state (RAM-resident) + the shared
+//! response buffer used by the dispatcher and the transport
+//! adapter.
+//!
+//! Protocol enums (`Session`, `SecurityLevel`, `SrvState`,
+//! `Nrc`) live in `types.rs`; this module holds only the
+//! engine's mutable state and its I/O helpers.
 
 use core::cell::RefCell;
 use core::sync::atomic::Ordering;
 use critical_section::Mutex;
 
-use super::nrc::Nrc;
-
-#[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Session {
-    Default = 0x01,
-    Programming = 0x02,
-    Extended = 0x03,
-}
-
-impl Session {
-    pub fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0x01 => Some(Self::Default),
-            0x02 => Some(Self::Programming),
-            0x03 => Some(Self::Extended),
-            _ => None,
-        }
-    }
-    pub const fn as_u8(self) -> u8 { self as u8 }
-}
-
-#[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SecurityLevel {
-    Locked = 0,
-    Sal1 = 1,
-    Sal2 = 2,
-    Sal3 = 3,
-}
-
-impl SecurityLevel {
-    pub fn from_u8(v: u8) -> Self {
-        match v {
-            0 => Self::Locked,
-            1 => Self::Sal1,
-            2 => Self::Sal2,
-            _ => Self::Sal3,
-        }
-    }
-    pub const fn as_u8(self) -> u8 { self as u8 }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum SrvState {
-    Idle,
-    Pending,
-}
+use super::types::{Nrc, Session, SecurityLevel, SrvState};
 
 /// UDS engine runtime state. Single-threaded owner (canopen
 /// task). `request_buf` is set at the start of `dispatch`;
@@ -74,9 +32,8 @@ pub struct UdsState {
     pub response_pending: bool,
     pub request_tick_ms: u32,
 
-    /// 0x28 CommControl: `true` ⇒ dispatcher rejects new
-    /// requests with 0x22 (except 0x28 0x00 enable, the
-    /// unlock path).
+    /// 0x28 CommControl: `true` ⇒ canopen task skips proactive
+    /// frames (heartbeat, NMT ACK, UDS responses).
     pub tx_disabled: bool,
 }
 

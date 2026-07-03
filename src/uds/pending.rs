@@ -29,9 +29,9 @@
 //! bytes" slot per PendingJob. For now the queue is
 //! infrastructure-only; no continuations are pushed.
 
-use super::config::UdsConfig;
-use super::nrc::Nrc;
 use super::state::{load_response, store_response, UdsState};
+use super::table::UdsConfig;
+use super::types::Nrc;
 
 /// Maximum number of pending jobs in the queue. 4 covers the OTA
 /// flow (TransferData + TransferExit + 2 waiting).
@@ -85,7 +85,7 @@ pub fn push_pending(state: &mut UdsState, config: &mut UdsConfig, f: PendingFn) 
     for slot in config.pending_queue.iter_mut() {
         if slot.is_none() {
             *slot = Some(PendingJob::new(f));
-            state.state = super::state::SrvState::Pending;
+            state.state = super::types::SrvState::Pending;
             return true;
         }
     }
@@ -110,7 +110,7 @@ pub fn push_pending(state: &mut UdsState, config: &mut UdsConfig, f: PendingFn) 
 /// and bump the timestamp so we don't send one every tick.
 #[inline(never)]
 pub fn tick(state: &mut UdsState, config: &mut UdsConfig, now_ms: u32) {
-    if state.state != super::state::SrvState::Pending {
+    if state.state != super::types::SrvState::Pending {
         return;
     }
 
@@ -150,12 +150,12 @@ pub fn tick(state: &mut UdsState, config: &mut UdsConfig, now_ms: u32) {
         state.response_pending = true;
         let queue_empty = config.pending_queue.iter().all(|j| j.is_none());
         if queue_empty {
-            state.state = super::state::SrvState::Idle;
+            state.state = super::types::SrvState::Idle;
         }
     }
 
     // 5. P2 timeout: push 0x78 if still pending and >P2 elapsed
-    if state.state == super::state::SrvState::Pending {
+    if state.state == super::types::SrvState::Pending {
         if now_ms.saturating_sub(state.request_tick_ms) >= config.p2_server_ms {
             send_response_pending(state);
             state.request_tick_ms = now_ms;

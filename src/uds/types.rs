@@ -1,11 +1,68 @@
-//! Negative Response Codes (NRC) for UDS (ISO 14229).
+//! UDS protocol-level types: enums that appear in the wire format
+//! or in the `UdsConfig` schema.
 //!
-//! Each variant maps to a single byte on the wire. The full set
-//! is per ISO 14229-1 §Annex B.2; we declare all the codes we'll
-//! ever send rather than a minimal subset, so adding new SIDs
-//! in future phases doesn't require touching this file.
+//! Per ISO 14229-1. The state-machine enum (`SrvState`) and the
+//! response codes (`Nrc`) live here too — they're protocol
+//! values, not engine state.
 
 use core::fmt;
+
+// ---- Session (0x10) ----
+
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Session {
+    Default = 0x01,
+    Programming = 0x02,
+    Extended = 0x03,
+}
+
+impl Session {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0x01 => Some(Self::Default),
+            0x02 => Some(Self::Programming),
+            0x03 => Some(Self::Extended),
+            _ => None,
+        }
+    }
+    pub const fn as_u8(self) -> u8 { self as u8 }
+}
+
+// ---- SecurityLevel (0x27) ----
+
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SecurityLevel {
+    Locked = 0,
+    Sal1 = 1,
+    Sal2 = 2,
+    Sal3 = 3,
+}
+
+impl SecurityLevel {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Locked,
+            1 => Self::Sal1,
+            2 => Self::Sal2,
+            _ => Self::Sal3,
+        }
+    }
+    pub const fn as_u8(self) -> u8 { self as u8 }
+}
+
+// ---- SrvState (engine state machine) ----
+
+#[derive(Copy, Clone, Debug, defmt::Format, PartialEq, Eq)]
+pub enum SrvState {
+    /// Accept new requests.
+    Idle,
+    /// A long-running job is in the pending queue.
+    Pending,
+}
+
+// ---- Nrc (ISO 14229-1 Annex B.2) ----
 
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -47,18 +104,19 @@ impl Nrc {
 
 impl fmt::Display for Nrc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
+        f.write_str(match self {
             Self::GeneralReject => "generalReject",
             Self::ServiceNotSupported => "serviceNotSupported",
             Self::SubFunctionNotSupported => "subFunctionNotSupported",
-            Self::IncorrectMessageLengthOrInvalidFormat => "incorrectMessageLengthOrInvalidFormat",
+            Self::IncorrectMessageLengthOrInvalidFormat
+                => "incorrectMessageLengthOrInvalidFormat",
             Self::ResponseTooLong => "responseTooLong",
             Self::BusyRepeatRequest => "busyRepeatRequest",
             Self::ConditionsNotCorrect => "conditionsNotCorrect",
             Self::RequestSequenceError => "requestSequenceError",
             Self::NoResponseFromSubnetComponent => "noResponseFromSubnetComponent",
-            Self::FailurePreventsExecutionOfRequestedAction =>
-                "failurePreventsExecutionOfRequestedAction",
+            Self::FailurePreventsExecutionOfRequestedAction
+                => "failurePreventsExecutionOfRequestedAction",
             Self::RequestOutOfRange => "requestOutOfRange",
             Self::SecurityAccessDenied => "securityAccessDenied",
             Self::AuthenticationRequired => "authenticationRequired",
@@ -70,13 +128,12 @@ impl fmt::Display for Nrc {
             Self::GeneralProgrammingFailure => "generalProgrammingFailure",
             Self::WrongBlockSequenceNumber => "wrongBlockSequenceNumber",
             Self::IllegalByteCountInBlockTransfer => "illegalByteCountInBlockTransfer",
-            Self::RequestCorrectlyReceivedResponsePending =>
-                "requestCorrectlyReceivedResponsePending",
-            Self::SubFunctionNotSupportedInActiveSession =>
-                "subFunctionNotSupportedInActiveSession",
-            Self::ServiceNotSupportedInActiveSession =>
-                "serviceNotSupportedInActiveSession",
-        };
-        f.write_str(s)
+            Self::RequestCorrectlyReceivedResponsePending
+                => "requestCorrectlyReceivedResponsePending",
+            Self::SubFunctionNotSupportedInActiveSession
+                => "subFunctionNotSupportedInActiveSession",
+            Self::ServiceNotSupportedInActiveSession
+                => "serviceNotSupportedInActiveSession",
+        })
     }
 }
