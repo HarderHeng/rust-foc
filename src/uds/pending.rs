@@ -37,21 +37,6 @@ use super::types::Nrc;
 /// flow (TransferData + TransferExit + 2 waiting).
 pub const PENDING_QUEUE_SIZE: usize = 4;
 
-/// Return value of `dispatch`.
-///
-/// `Ready` — response is ready in `state.response_buf`,
-/// caller should call `take_response`.
-///
-/// `Pending` — long task is queued; response is *not* ready
-/// (either a 0x78 was just sent, or the task hasn't finished
-/// yet). Caller should not read `last_response` and should
-/// wait for the next tick to push 0x78 / final response.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum DispatchResult {
-    Ready,
-    Pending,
-}
-
 /// Per-continuation context. The pending closure sets
 /// `complete = true` when it's done writing the response.
 pub struct UdsContext<'a> {

@@ -27,7 +27,7 @@
 use embassy_stm32::can::frame::FdFrame;
 use embedded_can::Id;
 
-use super::super::uds;
+use crate::uds;
 use super::state::load_response;
 
 // ============================================================================

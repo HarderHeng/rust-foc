@@ -16,12 +16,12 @@
 //! `state.tx_disabled`).
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use defmt::{info, warn};
+use defmt::info;
 
 use super::crypto::generate_key;
 use super::pending::{push_pending, PendingFn, UdsContext};
 use super::state::{store_response, UdsState};
-use super::types::{Nrc, SecurityLevel, Session, SrvState};
+use super::types::{Nrc, SecurityLevel, Session};
 use crate::ota;
 
 // ============================================================================
@@ -634,19 +634,7 @@ fn pending_exit(ctx: &mut UdsContext) {
     ctx.complete = true;
 }
 
-// ============================================================================
-// Trait so `mod.rs` can call dispatch_* without naming each one
-// ============================================================================
-//
 // `mod.rs` matches on `ServiceHandler` and dispatches to
 // `config.dispatch_0xNN`. We don't have a `dispatch_any` to
 // keep the per-SID call sites explicit (so reviewers can see
 // the exact wire-format contract per call).
-
-#[allow(dead_code)]
-fn _silence_unused_warning(_s: &SrvState) {
-    // Surfaces an unused-import warning if SrvState ever goes
-    // un-referenced. Drop this when SrvState gains a real
-    // consumer.
-    warn!("SrvState: {:?}", _s);
-}

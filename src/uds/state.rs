@@ -10,7 +10,7 @@ use core::cell::RefCell;
 use core::sync::atomic::Ordering;
 use critical_section::Mutex;
 
-use super::types::{Nrc, Session, SecurityLevel, SrvState};
+use super::types::{Session, SecurityLevel, SrvState};
 
 /// UDS engine runtime state. Single-threaded owner (canopen
 /// task). `request_buf` is set at the start of `dispatch`;
@@ -28,7 +28,6 @@ pub struct UdsState {
     pub state: SrvState,
     pub request_buf: [u8; 64],
     pub request_len: usize,
-    pub response_len: usize,
     pub response_pending: bool,
     pub request_tick_ms: u32,
 
@@ -47,7 +46,6 @@ impl UdsState {
             state: SrvState::Idle,
             request_buf: [0; 64],
             request_len: 0,
-            response_len: 0,
             response_pending: false,
             request_tick_ms: 0,
             tx_disabled: false,
@@ -67,7 +65,14 @@ pub static RESPONSE_LEN: core::sync::atomic::AtomicU8 =
 /// Write a UDS response into the shared buffer. Also sets
 /// `UDS_STATE.response_pending = true` so the canopen task
 /// picks it up. Returns the byte count written (clipped to 7).
+///
+/// **Truncation**: the internal buffer is 7 bytes. UDS responses
+/// over CAN-FD can be up to 64 bytes; any payload >7 will be
+/// silently truncated. DID callbacks and dispatch methods must
+/// keep their responses ≤7 bytes. This is fine for the standard
+/// SIDs we implement (longest response = 6 bytes for a seed).
 pub fn store_response(payload: &[u8]) -> usize {
+    debug_assert!(payload.len() <= 7, "UDS response {} bytes exceeds 7-byte buffer", payload.len());
     let len = payload.len().min(7);
     critical_section::with(|cs| {
         let buf = &mut *RESPONSE_BUF.borrow_ref_mut(cs);
@@ -96,7 +101,3 @@ pub fn load_response() -> ([u8; 7], u8) {
     (bytes, len)
 }
 
-/// Convenience: store a standard negative response.
-pub fn store_negative(sid: u8, nrc: Nrc) -> usize {
-    store_response(&nrc.negative_response(sid))
-}
