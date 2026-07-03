@@ -69,7 +69,6 @@ pub enum SrvState {
 /// other UDS code touches `state`.
 #[allow(dead_code)] // several fields are wired in Phase 5c/5d
 #[link_section = ".data"]
-#[derive(Copy, Clone)]
 pub struct UdsState {
     pub session: Session,
     pub security: SecurityLevel,
@@ -82,6 +81,11 @@ pub struct UdsState {
     pub current_seed: [u32; 3],
 
     pub state: SrvState,
+    /// The in-flight UDS request (set at the start of `dispatch`).
+    /// `request_len` bytes are valid; the rest is undefined.
+    /// Pending-queue closures read from here to recover their
+    /// input — no env capture needed.
+    pub request_buf: [u8; 64],
     pub request_len: usize,
     pub response_len: usize,
     /// `response_pending = true` means `response_buf[0..response_len]`
@@ -111,6 +115,7 @@ impl UdsState {
             seed_sent: [false; 3],
             current_seed: [0; 3],
             state: SrvState::Idle,
+            request_buf: [0; 64],
             request_len: 0,
             response_len: 0,
             response_pending: false,

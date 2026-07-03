@@ -68,7 +68,17 @@ pub fn init() {
     // static UDS_STATE is already zeroed via const; nothing to do
     // for Phase 5a. Hook left for future phases that need to
     // pre-compute the random seed table.
-    let _ = info!("UDS: init ok (Phase 5a)");
+    let _ = info!("UDS: init ok (Phase 7: pending queue + 0x78 wired)");
+}
+
+/// True iff a UDS response is ready in the shared buffer
+/// (set by sync handler or by `pending::tick` after a
+/// pending closure completes). canopen_task polls this
+/// after dispatch + tick to decide whether to TX a
+/// response.
+pub fn response_ready() -> bool {
+    let state = unsafe { &*(&raw const UDS_STATE) };
+    state.response_pending
 }
 
 /// Dispatch a UDS request. `request[0]` is the SID. The response
@@ -109,6 +119,19 @@ pub fn dispatch(request: &[u8]) {
         return;
     }
 
+    // Copy the request bytes into the in-flight buffer so
+    // pending-queue closures can read them via `UdsContext`.
+    state.request_len = request.len();
+    state.request_buf[..request.len()].copy_from_slice(request);
+
+    // OTA path needs `&mut UdsConfig` (to push onto the
+    // pending queue). Take a mut pointer through unsafe —
+    // single-threaded executor, canopen task is the sole
+    // owner. Other handlers use the shared `config`.
+    let config_mut: &mut UdsConfig = unsafe {
+        &mut *(&raw const crate::can::uds_config::UDS_CONFIG as *mut UdsConfig)
+    };
+
     match entry.handler {
         ServiceHandler::Session        => session::handle(state, config, request),
         ServiceHandler::EcuReset       => reset::handle(state, request),
@@ -121,9 +144,20 @@ pub fn dispatch(request: &[u8]) {
         ServiceHandler::RoutineStart   => routine::handle(state, config, request, routine::RoutineSub::Start),
         ServiceHandler::RoutineStop    => routine::handle(state, config, request, routine::RoutineSub::Stop),
         ServiceHandler::RoutineResult  => routine::handle(state, config, request, routine::RoutineSub::Result),
-        ServiceHandler::RequestDownload => download::handle_request(state, request),
-        ServiceHandler::TransferData    => download::handle_transfer(state, request),
-        ServiceHandler::TransferExit    => download::handle_exit(state, request),
+        // OTA path (Phase 7): push to pending queue. The
+        // closure runs in `pending::tick`. While the work is
+        // in-flight, `state.state == SrvState::Pending` and
+        // subsequent dispatches return `DispatchResult::Pending`
+        // (master should back off and poll later).
+        ServiceHandler::RequestDownload => {
+            let _queued = download::try_queue_request(state, config_mut);
+        }
+        ServiceHandler::TransferData => {
+            let _queued = download::try_queue_transfer(state, config_mut);
+        }
+        ServiceHandler::TransferExit => {
+            let _queued = download::try_queue_exit(state, config_mut);
+        }
         ServiceHandler::TesterPresent   => tester_present::handle(state, request),
     }
 }
