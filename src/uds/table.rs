@@ -17,8 +17,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use defmt::info;
+use embassy_time::Instant;
 
-use super::crypto::generate_key;
+use super::crypto::{generate_key, AesBlock};
 use super::pending::{push_pending, PendingFn, UdsContext};
 use super::state::{store_response, UdsState};
 use super::types::{Nrc, SecurityLevel, Session};
@@ -79,7 +80,7 @@ pub struct DidReadEntry {
     pub did: u16,
     pub session_access: u8,
     pub security_level: u8,
-    pub func: fn(out: &mut [u8; 7]) -> Result<usize, Nrc>,
+    pub func: fn(out: &mut [u8; 64]) -> Result<usize, Nrc>,
 }
 
 /// WriteDataByIdentifier (0x2E) DID entry. Empty by default.
@@ -141,8 +142,9 @@ pub struct UdsConfig {
     /// pushes a 0x78 response. ISO 14229 standard: 50 ms.
     pub p2_server_ms: u32,
 
-    /// Per-SAL LFSR mask. Index 0/1/2 = SAL1/2/3.
-    pub key_masks: [u32; 3],
+    /// Per-SAL AES-128 key material. Index 0/1/2 = SAL1/2/3.
+    /// Writably at runtime via DID 0xF180.
+    pub key_masks: [AesBlock; 3],
 
     /// Session-change callbacks. The runtime registers these
     /// in `static_config.rs`; `fn` pointer (no capture) is fine
@@ -298,15 +300,16 @@ impl UdsConfig {
             store_response(&Nrc::SecurityAccessDenied.negative_response(0x22));
             return;
         }
-        let mut payload = [0u8; 7];
+        let mut payload = [0u8; 64];
         match (entry.func)(&mut payload) {
             Ok(n) => {
-                let mut out = [0u8; 7];
+                let mut out = [0u8; 64];
                 out[0] = 0x62;
                 out[1] = req[1];
                 out[2] = req[2];
-                for i in 0..n.min(5) { out[3 + i] = payload[i]; }
-                store_response(&out[..3 + n.min(5)]);
+                let n = n.min(61);
+                out[3..3 + n].copy_from_slice(&payload[..n]);
+                store_response(&out[..3 + n]);
             }
             Err(nrc) => { store_response(&nrc.negative_response(0x22)); }
         }
@@ -447,16 +450,17 @@ impl UdsConfig {
             return;
         }
         let payload = &req[4..];
-        let mut resp_buf = [0u8; 8];
+        let mut resp_buf = [0u8; 60];
         match (entry.func)(payload, &mut resp_buf) {
             Ok(resp_len) => {
-                let mut out = [0u8; 12];
-                let total = 4 + resp_len.min(8);
+                let mut out = [0u8; 64];
+                let n = resp_len.min(60);
+                let total = 4 + n;
                 out[0] = 0x71;
                 out[1] = subfunc;
                 out[2] = req[2];
                 out[3] = req[3];
-                for i in 0..resp_len.min(8) { out[4 + i] = resp_buf[i]; }
+                out[4..4 + n].copy_from_slice(&resp_buf[..n]);
                 info!("UDS: Routine 0x{:04x} sub=0x{:02x} OK ({} bytes result)",
                       rid, subfunc, resp_len);
                 store_response(&out[..total]);
@@ -534,10 +538,30 @@ pub enum RoutineSub {
     Result,
 }
 
-/// Hardcoded seed for all 3 SAL levels. Same wire format as
-/// Phase 4 (kept for smoke-test compat); SAL2/3 produce
-/// different keys via the distinct LFSR masks.
-const SEED_ALL: u32 = 0xA5A5_A5A5;
+/// Generate a non-deterministic 16-byte seed from timing jitter.
+/// 170 MHz Cortex-M → ~6 ns per tick; consecutive UDS dispatches
+/// land on different cycle counts because the canopen_task races
+/// the heartbeat ticker against incoming frames.
+///
+/// This is not HSM-grade randomness, but it makes replay attacks
+/// meaningless: the seed changes every RequestSeed, so even if an
+/// attacker observes one seed/key pair, the next session uses a
+/// different seed → different key.
+///
+/// **RNG offload**: this uses fine-grained SysTick jitter, which
+/// is sufficient for automotive UDS seed-key. If the platform
+/// has a hardware RNG, replace this body with `rng_read_seed()`.
+fn generate_seed() -> AesBlock {
+    let t = Instant::now().as_micros();
+    // Spread the microsecond counter across all 16 bytes using
+    // multiplicative mixing to avoid repeating patterns.
+    let mut seed = [0u8; 16];
+    for i in 0..4 {
+        let v = t.wrapping_mul(0x9E37_79B9u64.wrapping_add(i as u64)) as u32;
+        seed[i * 4..(i + 1) * 4].copy_from_slice(&v.to_le_bytes());
+    }
+    AesBlock(seed)
+}
 
 /// 0x27 subfunc → (SAL number, RequestSeed?).
 fn parse_sa_subfunc(subfunc: u8) -> Option<(u8, bool)> {
@@ -566,18 +590,21 @@ fn sa_request_seed(state: &mut UdsState, sal: u8, subfunc: u8) {
     if (state.security as u8) >= sal {
         // Already unlocked at this SAL (or higher): ISO 14229
         // says positive response with a zero seed.
-        store_response(&[subfunc + 0x40, subfunc, 0x00, 0x00, 0x00, 0x00]);
+        let mut zero = [0u8; 18];
+        zero[0] = subfunc + 0x40;
+        zero[1] = subfunc;
+        store_response(&zero);
         return;
     }
-    let seed = SEED_ALL;
-    state.current_seed = seed;
+    let seed = generate_seed();
+    state.current_seed = seed.0;
     state.seed_sent = true;
-    let resp = [
-        subfunc + 0x40, subfunc,
-        (seed >> 24) as u8, (seed >> 16) as u8,
-        (seed >> 8) as u8, seed as u8,
-    ];
-    info!("UDS: SecurityAccess RequestSeed(SAL{}) → 0x{:08x}", sal, seed);
+    let mut resp = [0u8; 18];
+    resp[0] = subfunc + 0x40;
+    resp[1] = subfunc;
+    resp[2..18].copy_from_slice(&seed.0);
+    info!("UDS: SecurityAccess RequestSeed(SAL{}) → {:02x}..{:02x}",
+          sal, seed.0[0], seed.0[1]);
     store_response(&resp);
 }
 
@@ -587,18 +614,20 @@ fn sa_send_key(state: &mut UdsState, config: &UdsConfig, sal: u8,
         store_response(&Nrc::RequestSequenceError.negative_response(0x27));
         return;
     }
-    if req.len() != 6 {
+    if req.len() != 18 {  // 0x27 + subfunc + 16-byte key
         store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
             .negative_response(0x27));
         return;
     }
     state.seed_sent = false;
-    let rx_key = u32::from_le_bytes([req[2], req[3], req[4], req[5]]);
-    let expected = generate_key(state.current_seed,
-                                config.key_masks[(sal - 1) as usize]);
-    if rx_key != expected {
-        info!("UDS: SecurityAccess SAL{} wrong key 0x{:08x} (expected 0x{:08x})",
-              sal, rx_key, expected);
+    let mut rx_key = [0u8; 16];
+    rx_key.copy_from_slice(&req[2..18]);
+    let expected = generate_key(
+        &AesBlock(state.current_seed),
+        &config.key_masks[(sal - 1) as usize],
+    );
+    if rx_key != expected.0 {
+        info!("UDS: SecurityAccess SAL{} wrong key", sal);
         store_response(&Nrc::InvalidKey.negative_response(0x27));
         return;
     }

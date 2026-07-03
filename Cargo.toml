@@ -48,6 +48,9 @@ panic-probe = { version = "1", features = ["print-defmt"] }
 # embedded-io v0.6, hence the dual v0.6/v0.7 deps above.
 embedded-cli = { version = "0.2.1" }
 
+# AES-128 for UDS SecurityAccess seed-key derivation.
+aes = "0.8"
+
 [profile.release]
 debug = 2
 opt-level = "s"

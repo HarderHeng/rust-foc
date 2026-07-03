@@ -23,7 +23,7 @@ pub struct UdsState {
     /// `true` after a RequestSeed, cleared after the matching
     /// SendKey. Prevents out-of-order SendKey.
     pub seed_sent: bool,
-    pub current_seed: u32,
+    pub current_seed: [u8; 16],
 
     pub state: SrvState,
     pub request_buf: [u8; 64],
@@ -42,7 +42,7 @@ impl UdsState {
             session: Session::Default,
             security: SecurityLevel::Locked,
             seed_sent: false,
-            current_seed: 0,
+            current_seed: [0u8; 16],
             state: SrvState::Idle,
             request_buf: [0; 64],
             request_len: 0,
@@ -53,27 +53,27 @@ impl UdsState {
     }
 }
 
-/// Shared response buffer. Bounded to 7 bytes (SDO upload
-/// ceiling; CAN-FD allows 64 but UDS responses are almost
-/// always ≤7 anyway).
-pub type ResponseBuf = Mutex<RefCell<[u8; 7]>>;
+/// Shared response buffer. 64 bytes matches CAN-FD max payload
+/// (ISO 14229-3 §7 — UDS over CAN-FD single frame).
+pub type ResponseBuf = Mutex<RefCell<[u8; 64]>>;
 
-pub static RESPONSE_BUF: ResponseBuf = Mutex::new(RefCell::new([0; 7]));
+pub static RESPONSE_BUF: ResponseBuf = Mutex::new(RefCell::new([0; 64]));
 pub static RESPONSE_LEN: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(0);
 
 /// Write a UDS response into the shared buffer. Also sets
 /// `UDS_STATE.response_pending = true` so the canopen task
-/// picks it up. Returns the byte count written (clipped to 7).
+/// picks it up. Returns the byte count written (clipped to 64).
 ///
-/// **Truncation**: the internal buffer is 7 bytes. UDS responses
-/// over CAN-FD can be up to 64 bytes; any payload >7 will be
-/// silently truncated. DID callbacks and dispatch methods must
-/// keep their responses ≤7 bytes. This is fine for the standard
-/// SIDs we implement (longest response = 6 bytes for a seed).
+/// **Truncation**: the internal buffer is 64 bytes. Payloads
+/// >64 bytes will be silently truncated. None of the built-in
+/// SIDs exceed this — the longest response is an AES-128
+/// seed (18 bytes).
 pub fn store_response(payload: &[u8]) -> usize {
-    debug_assert!(payload.len() <= 7, "UDS response {} bytes exceeds 7-byte buffer", payload.len());
-    let len = payload.len().min(7);
+    debug_assert!(payload.len() <= 64,
+                  "UDS response {} bytes exceeds 64-byte buffer",
+                  payload.len());
+    let len = payload.len().min(64);
     critical_section::with(|cs| {
         let buf = &mut *RESPONSE_BUF.borrow_ref_mut(cs);
         buf[..len].copy_from_slice(&payload[..len]);
@@ -89,15 +89,14 @@ pub fn store_response(payload: &[u8]) -> usize {
 }
 
 /// Read the last stored UDS response. Returns `(bytes, len)`.
-pub fn load_response() -> ([u8; 7], u8) {
-    let mut bytes = [0u8; 7];
+pub fn load_response() -> ([u8; 64], u8) {
+    let mut bytes = [0u8; 64];
     let len = RESPONSE_LEN.load(Ordering::Relaxed);
     critical_section::with(|cs| {
         let buf = RESPONSE_BUF.borrow_ref(cs);
-        for i in 0..(len as usize).min(7) {
+        for i in 0..(len as usize).min(64) {
             bytes[i] = buf[i];
         }
     });
     (bytes, len)
 }
-

@@ -75,7 +75,7 @@ SDO_CMD_UPLOAD     = 0x40  # CCS=2 — Initiate Upload Request
 SDO_CMD_UPLOAD_SEG = 0x60  # CCS=3 — Upload Segment Request
 SDO_CMD_ABORT      = 0x80  # SCS=4 — Abort Transfer
 
-SDO_MAX_SEGMENTED_SIZE = 7
+SDO_MAX_SEGMENTED_SIZE = 18
 
 # Initiate Download n-mask (bits 2-3 of byte 0). 0x0C = bits 2-3,
 # NOT bit 4. See src/can/sdo.rs for the rationale.
@@ -121,41 +121,136 @@ SDO_ABORT_LENGTH_MISMATCH        = 0x0607_0010
 # OTA
 APP_START = 0x0800_0000
 APP_SIZE  = 0x1F800  # 124 KB app region (B-G431B-ESC1 has 128 KB)
-SEED = b'\xA5\xA5\xA5\xA5'
 
-# Phase 5a: SecurityAccess key derived from the seed via the
-# Rust LFSR + bit-reversal algorithm (see src/can/uds/security.rs).
-# The masks match `key_masks[0..2]` in src/uds/uds_config.rs.
-# Computed by hand (see scripts/smoke_test.py commit history).
-LFSR_MASK_SAL1 = 0x30002212
-LFSR_MASK_SAL2 = 0x524C5E63
-LFSR_MASK_SAL3 = 0xA5C3F11B
+# AES-128 single-block ECB for UDS seed-key.
+# Pure Python implementation — no dependencies.
+# Matches the Rust `generate_key` in src/uds/crypto.rs.
+AES_SBOX = (
+    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
+    0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0,
+    0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc,
+    0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a,
+    0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0,
+    0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b,
+    0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85,
+    0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5,
+    0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17,
+    0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88,
+    0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c,
+    0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9,
+    0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6,
+    0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e,
+    0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94,
+    0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68,
+    0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
+)
+AES_RCON = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36)
 
-def _reverse_bits(b: int) -> int:
-    b = ((b & 0xAA) >> 1) | ((b & 0x55) << 1)
-    b = ((b & 0xCC) >> 2) | ((b & 0x33) << 2)
-    b = ((b & 0xF0) >> 4) | ((b & 0x0F) << 4)
-    return b
+def _aes_sub_word(w: int) -> int:
+    return (AES_SBOX[(w >> 24) & 0xff] << 24 |
+            AES_SBOX[(w >> 16) & 0xff] << 16 |
+            AES_SBOX[(w >> 8) & 0xff] << 8 |
+            AES_SBOX[w & 0xff])
 
-def _lfsr_key(seed: int, mask: int) -> int:
-    state = seed & 0xFFFFFFFF
-    for _ in range(40):
-        if state & 0x80000000:
-            state = ((state << 1) ^ mask) & 0xFFFFFFFF
-        else:
-            state = (state << 1) & 0xFFFFFFFF
-    key = 0
-    for i in range(4):
-        byte = _reverse_bits((state >> ((3 - i) * 8)) & 0xFF)
-        key |= byte << (i * 8)
-    return key
+def _aes_key_expansion(key: bytes) -> list[int]:
+    nk, nb, nr = 4, 4, 10
+    w = [0] * (nb * (nr + 1))
+    for i in range(nk):
+        w[i] = (key[i*4] << 24 | key[i*4+1] << 16 |
+                key[i*4+2] << 8 | key[i*4+3])
+    for i in range(nk, nb * (nr + 1)):
+        temp = w[i - 1]
+        if i % nk == 0:
+            temp = _aes_sub_word((temp << 8) | (temp >> 24)) ^ (AES_RCON[i // nk - 1] << 24)
+        w[i] = w[i - nk] ^ temp
+    return w
 
-# Hardcoded so existing tests can reference the value directly.
-# Run `_lfsr_key(0xA5A5A5A5, <mask>)` to recompute if the
-# algorithm or masks ever change.
-KEY       = _lfsr_key(0xA5A5A5A5, LFSR_MASK_SAL1)  # = 0x497DFE82
-KEY_SAL2  = _lfsr_key(0xA5A5A5A5, LFSR_MASK_SAL2)
-KEY_SAL3  = _lfsr_key(0xA5A5A5A5, LFSR_MASK_SAL3)
+def _aes_encrypt_block(plaintext: bytes, key: bytes) -> bytes:
+    """AES-128 single-block ECB encryption. Returns 16 bytes."""
+    w = _aes_key_expansion(key)
+    state = list(plaintext)
+    def add_round_key(r: int):
+        for i in range(16):
+            state[i] ^= (w[r * 4 + i // 4] >> (24 - (i % 4) * 8)) & 0xff
+    def sub_bytes():
+        for i in range(16):
+            state[i] = AES_SBOX[state[i]]
+    def shift_rows():
+        state[1], state[5], state[9], state[13] = state[5], state[9], state[13], state[1]
+        state[2], state[6], state[10], state[14] = state[10], state[14], state[2], state[6]
+        state[3], state[7], state[11], state[15] = state[15], state[3], state[7], state[11]
+    def mix_columns():
+        for c in range(4):
+            i = c * 4
+            a0, a1, a2, a3 = state[i], state[i+1], state[i+2], state[i+3]
+            state[i]   = _gmul(2, a0) ^ _gmul(3, a1) ^ a2 ^ a3
+            state[i+1] = a0 ^ _gmul(2, a1) ^ _gmul(3, a2) ^ a3
+            state[i+2] = a0 ^ a1 ^ _gmul(2, a2) ^ _gmul(3, a3)
+            state[i+3] = _gmul(3, a0) ^ a1 ^ a2 ^ _gmul(2, a3)
+    def _gmul(a: int, b: int) -> int:
+        p = 0
+        for _ in range(8):
+            if b & 1: p ^= a
+            hi = a & 0x80
+            a = (a << 1) & 0xff
+            if hi: a ^= 0x1b
+            b >>= 1
+        return p
+    add_round_key(0)
+    for r in range(1, 10):
+        sub_bytes()
+        shift_rows()
+        mix_columns()
+        add_round_key(r)
+    sub_bytes()
+    shift_rows()
+    add_round_key(10)
+    return bytes(state)
+
+def _aes_key(seed: bytes, mask: bytes) -> bytes:
+    """AES-128-ECB: key = AES_encrypt(seed, key_material)."""
+    return _aes_encrypt_block(seed, mask)
+
+# Default AES key masks (16 bytes each, matching Rust
+# UDS_CONFIG.key_masks defaults in static_config.rs).
+KEY_MASK_SAL1 = bytes([
+    0x30, 0x00, 0x22, 0x12, 0xAB, 0xCD, 0xEF, 0x01,
+    0x23, 0x45, 0x67, 0x89, 0x01, 0x23, 0x45, 0x67,
+])
+KEY_MASK_SAL2 = bytes([
+    0x52, 0x4C, 0x5E, 0x63, 0xDE, 0xAD, 0xBE, 0xEF,
+    0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+])
+KEY_MASK_SAL3 = bytes([
+    0xA5, 0xC3, 0xF1, 0x1B, 0xCA, 0xFE, 0xBA, 0xBE,
+    0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12,
+])
+
+# 16-byte seed constant for emulator use.
+SEED_16 = bytes([
+    0xa5, 0xa5, 0xa5, 0xa5, 0xb0, 0xb1, 0xb2, 0xb3,
+    0xc0, 0xc1, 0xc2, 0xc3, 0xd0, 0xd1, 0xd2, 0xd3,
+])
+
+# Pre-computed AES keys for the above seed + masks (used by emulator).
+KEY       = _aes_key(SEED_16, KEY_MASK_SAL1)
+KEY_SAL2  = _aes_key(SEED_16, KEY_MASK_SAL2)
+KEY_SAL3  = _aes_key(SEED_16, KEY_MASK_SAL3)
 
 
 # ---- CRC-32/ISO-HDLC (matches src/can/ota.rs::crc32_update) -------
@@ -197,6 +292,8 @@ class FirmwareEmulator:
         self.uds_security = 0     # Locked
         self.uds_tx_disabled = False  # 0x28 CommControl state
         self.uds_rx_disabled = False
+        # Key masks (matching Rust UDS_CONFIG.key_masks defaults).
+        self.key_masks = [KEY_MASK_SAL1, KEY_MASK_SAL2, KEY_MASK_SAL3]
 
         # OTA state
         self.ota_state = 'Idle'
@@ -246,9 +343,9 @@ class FirmwareEmulator:
         if not resp_bytes:
             return None  # suppress positive response
         dlc = len(resp_bytes)
-        # Pad to 8 bytes (classic CAN always sends 8 bytes
-        # unless end-of-frame; we use dlc to convey length)
-        resp_padded = (resp_bytes + b'\x00' * 8)[:8]
+        # Pad to 64 bytes (CAN-FD). DLC conveys the actual
+        # response length; master reads only `data[:dlc]`.
+        resp_padded = (resp_bytes + b'\x00' * 64)[:64]
         return {
             'id': UDS_PHYSICAL_RESPONSE_ID,
             'data': resp_padded,
@@ -530,11 +627,26 @@ class FirmwareEmulator:
             self.last_response = bytes([0x7F, SID_RDBI, NRC_REQUEST_OUT_OF_RANGE])
 
     def _uds_wdbi(self, p: bytes) -> None:
-        # v1: no writable DIDs
         if len(p) < 2:
             self.last_response = bytes([0x7F, SID_WDBI, NRC_INCORRECT_MESSAGE_LENGTH])
             return
-        self.last_response = bytes([0x7F, SID_WDBI, NRC_REQUEST_OUT_OF_RANGE])
+        did = struct.unpack_from('<H', p, 0)[0]
+        if did == 0xF180:
+            if len(p) != 14:  # 2 ID + 12 data
+                self.last_response = bytes([0x7F, SID_WDBI, NRC_INCORRECT_MESSAGE_LENGTH])
+                return
+            masks = [
+                struct.unpack_from('<I', p, 2)[0],
+                struct.unpack_from('<I', p, 6)[0],
+                struct.unpack_from('<I', p, 10)[0],
+            ]
+            if any(m == 0 for m in masks):
+                self.last_response = bytes([0x7F, SID_WDBI, NRC_REQUEST_OUT_OF_RANGE])
+                return
+            self.key_masks = masks
+            self.last_response = bytes([SID_WDBI + 0x40, 0x80, 0xF1])
+        else:
+            self.last_response = bytes([0x7F, SID_WDBI, NRC_REQUEST_OUT_OF_RANGE])
 
     def _uds_sa(self, p: bytes) -> None:
         if not p:
@@ -554,51 +666,46 @@ class FirmwareEmulator:
             self.last_response = bytes(
                 [0x7F, SID_SA, NRC_SUB_FUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION])
             return
+        # Helper: zero seed response (already unlocked).
+        zero_seed = lambda s: bytes([SID_SA + 0x40, s]) + b'\x00' * 16
         if sub == 0x01:
             if self.uds_security != 0:
-                # ISO 14229: already-unlocked → positive with
-                # zero seed, NOT an NRC. A real master uses this
-                # as "no key needed, proceed".
-                self.last_response = bytes([SID_SA + 0x40, 0x01, 0x00, 0x00, 0x00, 0x00])
+                self.last_response = zero_seed(0x01)
                 return
-            # 6-byte response: 0x67, subfunc, seed[4]
-            self.last_response = bytes([SID_SA + 0x40, 0x01]) + SEED
+            self.last_response = bytes([SID_SA + 0x40, 0x01]) + SEED_16
         elif sub == 0x02:
-            if len(p) != 5:
+            if len(p) != 17:
                 self.last_response = bytes([0x7F, SID_SA, NRC_INCORRECT_MESSAGE_LENGTH])
                 return
-            key = struct.unpack_from('<I', p, 1)[0]
-            if key == KEY:
+            if p[1:17] == _aes_key(SEED_16, self.key_masks[0]):
                 self.uds_security = 1
                 self.last_response = bytes([SID_SA + 0x40, 0x02])
             else:
                 self.last_response = bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED])
         elif sub == 0x03:
             if self.uds_security >= 2:
-                self.last_response = bytes([SID_SA + 0x40, 0x03, 0x00, 0x00, 0x00, 0x00])
+                self.last_response = zero_seed(0x03)
                 return
-            self.last_response = bytes([SID_SA + 0x40, 0x03]) + SEED
+            self.last_response = bytes([SID_SA + 0x40, 0x03]) + SEED_16
         elif sub == 0x04:
-            if len(p) != 5:
+            if len(p) != 17:
                 self.last_response = bytes([0x7F, SID_SA, NRC_INCORRECT_MESSAGE_LENGTH])
                 return
-            key = struct.unpack_from('<I', p, 1)[0]
-            if key == KEY_SAL2:
+            if p[1:17] == _aes_key(SEED_16, self.key_masks[1]):
                 self.uds_security = 2
                 self.last_response = bytes([SID_SA + 0x40, 0x04])
             else:
                 self.last_response = bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED])
         elif sub == 0x05:
             if self.uds_security >= 3:
-                self.last_response = bytes([SID_SA + 0x40, 0x05, 0x00, 0x00, 0x00, 0x00])
+                self.last_response = zero_seed(0x05)
                 return
-            self.last_response = bytes([SID_SA + 0x40, 0x05]) + SEED
+            self.last_response = bytes([SID_SA + 0x40, 0x05]) + SEED_16
         elif sub == 0x06:
-            if len(p) != 5:
+            if len(p) != 17:
                 self.last_response = bytes([0x7F, SID_SA, NRC_INCORRECT_MESSAGE_LENGTH])
                 return
-            key = struct.unpack_from('<I', p, 1)[0]
-            if key == KEY_SAL3:
+            if p[1:17] == _aes_key(SEED_16, self.key_masks[2]):
                 self.uds_security = 3
                 self.last_response = bytes([SID_SA + 0x40, 0x06])
             else:
@@ -902,12 +1009,12 @@ class MasterDriver:
     # ---- low-level frame builders -----------------------------------
 
     def _frame_uds(self, payload: bytes) -> dict:
-        """Phase 6: build a raw UDS frame on 0x7E0 (physical
-        request). 1-8 bytes payload (classic CAN limit)."""
-        assert 1 <= len(payload) <= 8, f"UDS frame must be 1-8 bytes, got {len(payload)}"
+        """Phase 6: build a raw UDS frame on 0x7E0 (CAN-FD,
+        supports up to 64 bytes payload)."""
+        assert 1 <= len(payload) <= 64, f"UDS frame must be 1-64 bytes, got {len(payload)}"
         return {
             'id': UDS_PHYSICAL_REQUEST_ID,
-            'data': (payload + b'\x00' * 8)[:8],
+            'data': (payload + b'\x00' * 64)[:64],
             'dlc': len(payload),
         }
 
@@ -984,12 +1091,10 @@ class MasterDriver:
     def sdo_write_long(self, idx: int, sub: int, value: bytes) -> bool:
         """SDO download for values that exceed the expedited 4-byte
         ceiling. Uses segmented transfer (0x21 Initiate + one or
-        more 0x00 Segments). For 5–7 bytes a single segment
-        carries the whole payload; this implementation caps at 14
-        bytes (two segments) which is more than enough for every
-        UDS request the firmware handles (sendKey = 5, RequestDownload = 5).
+        more 0x00 Segments). Extended to 64 bytes for AES-128
+        sendKey (18 bytes) and OTA RequestDownload.
         """
-        assert 5 <= len(value) <= 14
+        assert 5 <= len(value) <= 64
         size = len(value)
         init = self.bus.send(self._frame_sdo_dl_initiate(idx, sub, size))
         _assert(init is not None, "no SDO initiate response")
@@ -1149,7 +1254,7 @@ def s_uds_rc_start(bus: Bus) -> None:
     # Get into ProgrammingSession: SecurityAccess then DSC 0x02.
     drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
     drv.sdo_read(0x2F00, 0)  # consume seed
-    drv.sdo_write_long(0x2F00, 0, bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
+    drv.sdo_write_long(0x2F00, 0, bytes([SID_SA, 0x02]) + KEY)
     drv.sdo_read(0x2F00, 0)  # consume key-accepted
     drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x02]))
     drv.sdo_read(0x2F00, 0)  # consume dsc-accepted
@@ -1188,29 +1293,44 @@ def s_uds_session_gate_nrc(bus: Bus) -> None:
                  "ReadDID unknown → 0x31")
 
 
-def s_uds_lfsr_key_known(bus: Bus) -> None:
-    """Verify the LFSR-derived key for SAL1 matches the reference
-    vector 0x497DFE82. Regression guard: if anyone changes the
-    LFSR algorithm or mask, this catches it."""
-    assert KEY == 0x497DFE82, \
-        f"KEY drifted: expected 0x497DFE82, got 0x{KEY:08X}"
+def s_uds_aes_kat(bus: Bus) -> None:
+    """AES-128 known-answer test: verify the Python AES matches
+    the NIST reference vector (the Rust side tests its own)."""
+    key = bytes(range(16))  # 00..0f
+    pt = bytes([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+    ct = _aes_key(pt, key)
+    expected = bytes([
+        0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30,
+        0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a,
+    ])
+    assert_bytes(ct, expected, "AES-128 KAT")
 
+def s_uds_security_unlock(bus: Bus) -> None:
+    """Full security dance via direct UDS transport:
 
-def s_uds_seed_when_unlocked_again(bus: Bus) -> None:
-    """Two consecutive RequestSeed cycles: first issues seed,
-    second (after unlock) issues zero seed. Verifies seed_sent
-    flag handling and the multi-step session path."""
+    1. Try ProgrammingSession without unlock → 0x33.
+    2. RequestSeed (0x27 0x01) → 18-byte seed response.
+    3. SendKey (0x27 0x02 + 16-byte key) → positive.
+    4. ProgrammingSession (0x10 0x02) → 0x50 0x02.
+    """
     drv = MasterDriver(bus)
-    # Get unlocked.
-    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
-    drv.sdo_read(0x2F00, 0)
-    drv.sdo_write_long(0x2F00, 0, bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
-    drv.sdo_read(0x2F00, 0)
-    # Now ask for seed again — should be 6 bytes with all-zero seed.
-    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes([SID_SA + 0x40, 0x01, 0x00, 0x00, 0x00, 0x00]),
-                 "RequestSeed when unlocked → zero seed")
+    # 1. Locked → ProgrammingSession denied.
+    resp = drv.send_uds(bytes([SID_DSC, 0x02]))
+    assert_bytes(resp, bytes([0x7F, SID_DSC, NRC_SECURITY_ACCESS_DENIED]),
+                 "DSC 0x02 without unlock")
+    # 2. RequestSeed.
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    assert_bytes(resp[:2], bytes([SID_SA + 0x40, 0x01]), "seed response header")
+    _assert(len(resp) == 18, f"seed response {len(resp)} bytes (expected 18)")
+    seed = resp[2:]
+    # 3. SendKey (compute key from the real seed).
+    expected_key = _aes_key(seed, KEY_MASK_SAL1)
+    resp = drv.send_uds(bytes([SID_SA, 0x02]) + expected_key)
+    assert_bytes(resp, bytes([SID_SA + 0x40, 0x02]), "key accepted")
+    # 4. ProgrammingSession.
+    resp = drv.send_uds(bytes([SID_DSC, 0x02]))
+    assert_bytes(resp, bytes([SID_DSC + 0x40, 0x02]), "DSC 0x02 after unlock")
 
 
 def s_uds_programming_needs_sal(bus: Bus) -> None:
@@ -1251,9 +1371,11 @@ def s_uds_transport_security_full(bus: Bus) -> None:
     drv = MasterDriver(bus)
     # RequestSeed
     resp = drv.send_uds(bytes([SID_SA, 0x01]))
-    assert_bytes(resp, bytes([SID_SA + 0x40, 0x01]) + SEED, "seed")
-    # SendKey
-    resp = drv.send_uds(bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
+    _assert(len(resp) == 18, f"seed response {len(resp)} bytes (expected 18)")
+    seed = resp[2:]
+    # SendKey (compute key from seed dynamically).
+    expected_key = _aes_key(seed, KEY_MASK_SAL1)
+    resp = drv.send_uds(bytes([SID_SA, 0x02]) + expected_key)
     assert_bytes(resp, bytes([SID_SA + 0x40, 0x02]), "key accepted")
     # ProgrammingSession
     resp = drv.send_uds(bytes([SID_DSC, 0x02]))
@@ -1293,95 +1415,51 @@ def s_uds_session_default(bus: Bus) -> None:
     assert_bytes(val, bytes([SID_DSC + 0x40, 0x01]), "DefaultSession response")
 
 
-def s_uds_security_unlock(bus: Bus) -> None:
-    """Full security dance:
-
-    1. Try ProgrammingSession without unlock → 0x33 SecurityAccessDenied.
-    2. RequestSeed (0x27 0x01) → 0x67 0x01 0xA5 0xA5 0xA5 0xA5
-       (6 bytes — exercises segmented SDO upload).
-    3. SendKey (0x27 0x02 + 4-byte key) → 0x67 0x02.
-    4. ProgrammingSession (0x10 0x02) → 0x50 0x02.
-    """
-    drv = MasterDriver(bus)
-    # 1. Locked → ProgrammingSession denied.
-    drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x02]))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes([0x7F, SID_DSC, NRC_SECURITY_ACCESS_DENIED]),
-                 "DSC 0x02 without unlock")
-    # 2. RequestSeed.
-    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes([SID_SA + 0x40, 0x01]) + SEED, "4-byte seed response")
-    # 3. SendKey — 5 bytes, so this needs segmented SDO download.
-    drv.sdo_write_long(0x2F00, 0,
-                       bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes([SID_SA + 0x40, 0x02]), "key accepted")
-    # 4. Now ProgrammingSession works.
-    drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x02]))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes([SID_DSC + 0x40, 0x02]), "DSC 0x02 after unlock")
-
-
 def s_uds_security_sal2(bus: Bus) -> None:
-    """SAL2 unlock dance. Per ISO 14229 practice, SAL2 is reachable
-    from ProgrammingSession or ExtendedSession (we use Programming
-    here to keep the test independent of the ExtendedSession
-    subfuncs). Subfunc 0x03/0x04 use a different LFSR mask
-    (key_masks[1] = 0x524C_5E63), so the key is different from
-    SAL1 even though the seed is the same.
-    """
+    """SAL2 unlock via direct UDS transport. Uses mask KEY_MASK_SAL2,
+    reachable from ProgrammingSession."""
     drv = MasterDriver(bus)
     # Unlock SAL1 first.
-    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
-    drv.sdo_read(0x2F00, 0)
-    drv.sdo_write_long(0x2F00, 0,
-                       bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
-    drv.sdo_read(0x2F00, 0)
-    # Enter ProgrammingSession (clears SAL, but we re-do it).
-    drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x02]))
-    drv.sdo_read(0x2F00, 0)
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    seed = resp[2:]
+    sk = _aes_key(seed, KEY_MASK_SAL1)
+    drv.send_uds(bytes([SID_SA, 0x02]) + sk)
+    # Enter ProgrammingSession (clears SAL).
+    drv.send_uds(bytes([SID_DSC, 0x02]))
     # RequestSeed SAL2.
-    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x03]))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes([SID_SA + 0x40, 0x03]) + SEED, "SAL2 seed")
-    # SendKey SAL2 (different mask → different key).
-    drv.sdo_write_long(0x2F00, 0,
-                       bytes([SID_SA, 0x04]) + struct.pack('<I', KEY_SAL2))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes([SID_SA + 0x40, 0x04]), "SAL2 unlocked")
+    resp = drv.send_uds(bytes([SID_SA, 0x03]))
+    _assert(len(resp) == 18, f"SAL2 seed response length {len(resp)}")
+    seed2 = resp[2:]
+    # SendKey SAL2.
+    sk2 = _aes_key(seed2, KEY_MASK_SAL2)
+    resp = drv.send_uds(bytes([SID_SA, 0x04]) + sk2)
+    assert_bytes(resp, bytes([SID_SA + 0x40, 0x04]), "SAL2 unlocked")
 
 
 def s_uds_security_sal3(bus: Bus) -> None:
-    """SAL3 unlock dance. SAL3 is only reachable from ExtendedSession
-    per `sal_session_allowed`. Verifies the gate: SAL3 seed from
-    DefaultSession is denied with `SubFunctionNotSupportedInActiveSession`.
-    """
+    """SAL3 unlock via direct UDS transport. SAL3 is only
+    reachable from ExtendedSession."""
     drv = MasterDriver(bus)
-    # 1. Default session → SAL3 denied (need Extended first).
-    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x05]))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes(
+    # 1. Default session → SAL3 denied.
+    resp = drv.send_uds(bytes([SID_SA, 0x05]))
+    assert_bytes(resp, bytes(
         [0x7F, SID_SA, NRC_SUB_FUNCTION_NOT_SUPPORTED_IN_ACTIVE_SESSION]),
         "SAL3 denied in Default session")
-    # 2. Unlock SAL1, enter Programming, then enter Extended.
-    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
-    drv.sdo_read(0x2F00, 0)
-    drv.sdo_write_long(0x2F00, 0,
-                       bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
-    drv.sdo_read(0x2F00, 0)
-    drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x03]))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes([SID_DSC + 0x40, 0x03]), "ExtendedSession accepted")
+    # 2. Unlock SAL1, enter Extended.
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    seed = resp[2:]
+    sk1 = _aes_key(seed, KEY_MASK_SAL1)
+    drv.send_uds(bytes([SID_SA, 0x02]) + sk1)
+    resp = drv.send_uds(bytes([SID_DSC, 0x03]))
+    assert_bytes(resp, bytes([SID_DSC + 0x40, 0x03]), "ExtendedSession")
     # 3. RequestSeed SAL3.
-    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x05]))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes([SID_SA + 0x40, 0x05]) + SEED, "SAL3 seed")
-    # 4. SendKey SAL3 (key_masks[2] = 0xA5C3_F11B).
-    drv.sdo_write_long(0x2F00, 0,
-                       bytes([SID_SA, 0x06]) + struct.pack('<I', KEY_SAL3))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes([SID_SA + 0x40, 0x06]), "SAL3 unlocked")
+    resp = drv.send_uds(bytes([SID_SA, 0x05]))
+    _assert(len(resp) == 18, f"SAL3 seed response length {len(resp)}")
+    seed3 = resp[2:]
+    # 4. SendKey SAL3.
+    sk3 = _aes_key(seed3, KEY_MASK_SAL3)
+    resp = drv.send_uds(bytes([SID_SA, 0x06]) + sk3)
+    assert_bytes(resp, bytes([SID_SA + 0x40, 0x06]), "SAL3 unlocked")
 
 
 def s_uds_reset_soft(bus: Bus) -> None:
@@ -1415,40 +1493,31 @@ def s_uds_active_did(bus: Bus) -> None:
 
 
 def s_uds_wrong_key(bus: Bus) -> None:
-    """SendKey with the wrong value → 0x33 SecurityAccessDenied.
-
-    SendKey is 5 bytes (1 SID + 1 sub + 4 key), so we use the
-    segmented SDO download path. See `MasterDriver.sdo_write_long`.
-    """
+    """SendKey with the wrong value → 0x33 SecurityAccessDenied."""
     drv = MasterDriver(bus)
-    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
-    drv.sdo_read(0x2F00, 0)  # consume seed
-    drv.sdo_write_long(0x2F00, 0,
-                       bytes([SID_SA, 0x02, 0x00, 0x00, 0x00, 0x00]))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val, bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED]),
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    # Extract seed, ignore it — we'll send a bogus key.
+    bogus_key = b'\x00' * 16
+    resp = drv.send_uds(bytes([SID_SA, 0x02]) + bogus_key)
+    assert_bytes(resp, bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED]),
                  "wrong key rejected")
 
 
 def s_uds_request_seed_when_unlocked(bus: Bus) -> None:
     """ISO 14229: when SecurityAccess is already unlocked,
     RequestSeed must return a positive response with a zero
-    seed (all bytes 0x00), not an NRC. A real master uses that
-    to detect "no key needed, proceed".
-    """
+    seed (all bytes 0x00), not an NRC."""
     drv = MasterDriver(bus)
     # Get unlocked: seed + correct key.
-    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
-    drv.sdo_read(0x2F00, 0)  # consume seed
-    drv.sdo_write_long(0x2F00, 0,
-                       bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
-    drv.sdo_read(0x2F00, 0)  # consume key-accepted
-    # Now ask for seed again — should be positive with 4 zero bytes.
-    drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
-    val = drv.sdo_read(0x2F00, 0)
-    assert_bytes(val,
-                 bytes([SID_SA + 0x40, 0x01, 0x00, 0x00, 0x00, 0x00]),
-                 "requestSeed when unlocked → zero seed")
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    seed = resp[2:]
+    expected_key = _aes_key(seed, KEY_MASK_SAL1)
+    drv.send_uds(bytes([SID_SA, 0x02]) + expected_key)
+    # Request seed again — zero seed.
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    _assert(len(resp) == 18, f"zero-seed response {len(resp)} bytes (expected 18)")
+    assert_bytes(resp[:2], bytes([SID_SA + 0x40, 0x01]), "zero seed header")
+    _assert(all(b == 0 for b in resp[2:]), "zero seed body")
 
 
 def s_ota_block_seq(bus: Bus) -> None:
@@ -1463,7 +1532,7 @@ def s_ota_block_seq(bus: Bus) -> None:
     drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
     drv.sdo_read(0x2F00, 0)
     drv.sdo_write_long(0x2F00, 0,
-                       bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
+                       bytes([SID_SA, 0x02]) + KEY)
     drv.sdo_read(0x2F00, 0)
     drv.sdo_write(0x2F00, 0, bytes([SID_DSC, 0x02]))
     drv.sdo_read(0x2F00, 0)
@@ -1524,7 +1593,7 @@ def s_seg_size_field(bus: Bus) -> None:
     drv.sdo_write(0x2F00, 0, bytes([SID_SA, 0x01]))
     init = drv.bus.send(drv._frame_sdo_read(0x2F00, 0))
     size = struct.unpack_from('<H', init['data'], 4)[0]
-    _assert(size == 6, f"size field should be 6, got {size}")
+    _assert(size == 18, f"size field should be 18 (AES-128 seed), got {size}")
 
 
 def s_seg_replay_after_done(bus: Bus) -> None:
@@ -1558,7 +1627,7 @@ def s_seg_dl_one_segment(bus: Bus) -> None:
     """5-byte value fits in one 7-byte segment with c=1 and n=2."""
     drv = MasterDriver(bus)
     drv.sdo_write_long(0x2F00, 0,
-                       bytes([SID_SA, 0x02]) + struct.pack('<I', KEY))
+                       bytes([SID_SA, 0x02]) + KEY)
     val = drv.sdo_read(0x2F00, 0)
     assert_bytes(val, bytes([SID_SA + 0x40, 0x02]), "key accepted")
 
@@ -1631,8 +1700,7 @@ SCENARIOS: dict[str, callable] = {
     "uds_active_did":      s_uds_active_did,
     "uds_wrong_key":       s_uds_wrong_key,
     "uds_seed_when_unlocked": s_uds_request_seed_when_unlocked,
-    "uds_seed_when_unlocked_again": s_uds_seed_when_unlocked_again,
-    "uds_lfsr_key_known":  s_uds_lfsr_key_known,
+    "uds_aes_kat":         s_uds_aes_kat,
     "uds_session_gate_nrc": s_uds_session_gate_nrc,
     "uds_programming_needs_sal": s_uds_programming_needs_sal,
     "uds_cc_disable":      s_uds_cc_disable,

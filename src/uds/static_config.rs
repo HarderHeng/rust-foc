@@ -11,9 +11,10 @@
 //! holds a closure (not `Sync`); the `unsafe` is required at
 //! the static initializer.
 
+use crate::uds::crypto::AesBlock;
 use crate::uds::table::{DidReadEntry, DidWriteEntry, RoutineEntry,
                           ServiceEntry, ServiceHandler, UdsConfig};
-use crate::uds::types::{Nrc, Session};
+use crate::uds::types::Nrc;
 
 // Service table. Order is irrelevant (linear search); we group
 // related services for readability.
@@ -36,7 +37,7 @@ static SERVICES: &[ServiceEntry] = &[
 // ---- DID read callbacks --------------------------------------------------
 
 /// 0xF186 = ActiveDiagSession. Read-only 1-byte value.
-fn read_active_session(out: &mut [u8; 7]) -> Result<usize, Nrc> {
+fn read_active_session(out: &mut [u8; 64]) -> Result<usize, Nrc> {
     out[0] = crate::uds::UDS_STATE.session.as_u8();
     Ok(1)
 }
@@ -50,8 +51,47 @@ static READ_DIDS: &[DidReadEntry] = &[
     },
 ];
 
-// Write DIDs: none in v1.
-static WRITE_DIDS: &[DidWriteEntry] = &[];
+// ---- DID write callbacks ---------------------------------------------------
+
+/// 0xF180 = KeyDataMasks (vendor-specific, writable). Accepts 48 bytes
+/// = 3 × AES-128 key (16 bytes each, LE):
+///   `[mask_sal1(16), mask_sal2(16), mask_sal3(16)]`.
+/// All-zero masks are rejected.
+fn write_key_masks(data: &[u8]) -> Result<(), Nrc> {
+    if data.len() != 48 {
+        return Err(Nrc::IncorrectMessageLengthOrInvalidFormat);
+    }
+    let mut raw = [[0u8; 16]; 3];
+    for i in 0..3 {
+        raw[i].copy_from_slice(&data[i * 16..(i + 1) * 16]);
+        if raw[i].iter().all(|&b| b == 0) {
+            return Err(Nrc::RequestOutOfRange);
+        }
+    }
+    let masks = [
+        AesBlock(raw[0]),
+        AesBlock(raw[1]),
+        AesBlock(raw[2]),
+    ];
+    // Safety: single-threaded executor; called from dispatch which
+    // is the sole owner of the UDS_CONFIG static.
+    unsafe {
+        let cfg = &mut *(&raw mut crate::uds::static_config::UDS_CONFIG
+                         as *mut crate::uds::table::UdsConfig);
+        cfg.key_masks = masks;
+    }
+    defmt::info!("UDS: key_masks updated via DID 0xF180");
+    Ok(())
+}
+
+static WRITE_DIDS: &[DidWriteEntry] = &[
+    DidWriteEntry {
+        did: 0xF180,
+        session_access: 0b011,  // Programming | Extended
+        security_level: 2,       // SAL2+
+        func: write_key_masks,
+    },
+];
 
 // ---- Pending queue -------------------------------------------------------
 
@@ -114,11 +154,22 @@ pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     routines_result: ROUTINES_RESULT,
     pending_queue: unsafe { &mut PENDING_QUEUE },
     p2_server_ms: 50,
-    key_masks: [0x3000_2212, 0x524C_5E63, 0xA5C3_F11B],
+    key_masks: [
+        AesBlock::from_bytes([
+            0x30, 0x00, 0x22, 0x12, 0xAB, 0xCD, 0xEF, 0x01,
+            0x23, 0x45, 0x67, 0x89, 0x01, 0x23, 0x45, 0x67,
+        ]),
+        AesBlock::from_bytes([
+            0x52, 0x4C, 0x5E, 0x63, 0xDE, 0xAD, 0xBE, 0xEF,
+            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+        ]),
+        AesBlock::from_bytes([
+            0xA5, 0xC3, 0xF1, 0x1B, 0xCA, 0xFE, 0xBA, 0xBE,
+            0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12,
+        ]),
+    ],
     on_default_session_enter: None,
     on_programming_session_enter: None,
     on_extended_session_enter: None,
 };
 
-#[allow(dead_code)]
-fn _silence_unused(_s: &Session) {}
