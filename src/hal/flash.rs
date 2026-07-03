@@ -159,16 +159,18 @@ pub fn read_u32(offset: u32) -> u32 {
 }
 
 /// Write the post-OTA metadata block. Layout (must match the
-/// reader side, typically `src/metadata.rs`):
+/// reader side, `src/metadata.rs::Metadata`):
 ///
-///   0x00: magic      (u32, LE)
-///   0x04: image_size (u32, LE)
-///   0x08: image_crc  (u32, LE)
-///   0x0C: padding    (u32, 0xFFFF_FFFF — anything works)
+///   0x00: magic          (u32, LE)
+///   0x04: image_size     (u32, LE)
+///   0x08: image_crc      (u32, LE)
+///   0x0C: version[0..8]  (LE u64 — first 8 bytes of the
+///                          null-padded UTF-8 version string)
+///   0x14: version[8..16] (LE u64 — second 8 bytes)
+///   0x1C: build_timestamp (u32, LE)
 ///
-/// The block is written as two u64s. Both writes must land in
-/// the same page (the metadata block is one page); we check
-/// that explicitly.
+/// All four writes must land in the same page (the metadata
+/// block is one page); the cross-page check covers them all.
 ///
 /// The metadata block is NOT erased by `erase_app_region` —
 /// the OTA path needs the previous image's metadata to survive
@@ -183,31 +185,48 @@ pub unsafe fn write_metadata(
     magic: u32,
     image_size: u32,
     image_crc: u32,
+    version: &[u8; 16],
+    build_timestamp: u32,
 ) -> Result<(), FlashError> {
-    // Single-page check — both u64 writes need to be in the
-    // 0x0801_F800 page.
-    if page_of(METADATA_ADDR) != page_of(METADATA_ADDR + WRITE_SIZE - 1) {
+    // Single-page check — all four u64 writes need to be in the
+    // 0x0801_F800 page. METADATA_ADDR is 8-byte aligned, +24 = +32
+    // is still in the 2 KB block (which is one page).
+    if page_of(METADATA_ADDR) != page_of(METADATA_ADDR + 31) {
         // Should be unreachable given our constants, but defend.
         return Err(FlashError::CrossPage);
     }
-    // The metadata block lives outside APP_END (it's the 2 KB
-    // reserved area). write_u64 rejects offsets in that range,
-    // so we write it directly here with the same unlock / PG /
-    // wait_busy sequence.
     unlock_sequence();
     let flash = pac::FLASH;
     flash.cr().modify(|w| w.set_pg(true));
 
-    // First u64: magic + image_size (LE).
+    // u64 #0: magic + image_size.
     let word0: u64 = (magic as u64) | ((image_size as u64) << 32);
     core::ptr::write_volatile(METADATA_ADDR as *mut u64, word0);
     wait_busy();
     let r = check_and_clear_errors();
 
-    // Second u64: image_crc + padding.
+    // u64 #1: image_crc + version[0..8] (LE).
+    let version_lo: u64 = u64::from_le_bytes(version[0..8].try_into().unwrap());
+    let word1: u64 = (image_crc as u64) | (version_lo << 32);
     if r.is_ok() {
-        let word1: u64 = (image_crc as u64) | (0xFFFF_FFFF_u64 << 32);
         core::ptr::write_volatile((METADATA_ADDR + 8) as *mut u64, word1);
+        wait_busy();
+        let _ = check_and_clear_errors();
+    }
+
+    // u64 #2: version[8..16] (LE) + padding.
+    let version_hi: u64 = u64::from_le_bytes(version[8..16].try_into().unwrap());
+    if r.is_ok() {
+        let word2: u64 = version_hi; // upper 32 bits stay 0
+        core::ptr::write_volatile((METADATA_ADDR + 16) as *mut u64, word2);
+        wait_busy();
+        let _ = check_and_clear_errors();
+    }
+
+    // u64 #3: padding + build_timestamp.
+    if r.is_ok() {
+        let word3: u64 = build_timestamp as u64;
+        core::ptr::write_volatile((METADATA_ADDR + 24) as *mut u64, word3);
         wait_busy();
         let _ = check_and_clear_errors();
     }

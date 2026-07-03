@@ -28,4 +28,7 @@ fn main() {
     println!("cargo:rustc-env=FOC_BUILD_TIMESTAMP={}", ts);
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    // The git SHA env var should re-trigger when HEAD moves.
+    println!("cargo:rerun-if-changed=.git/HEAD");
 }

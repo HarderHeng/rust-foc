@@ -161,9 +161,17 @@ pub fn board_init(p: Peripherals) -> BoardHandles {
     pwm.set_dead_time(DEAD_TIME_CYCLES);
 
     // Idle state on MOE=0: force low-sides ON, high-sides OFF so
-    // current can freewheel through the low-side diode of every
-    // phase. This is the safer of the two IdlePolarity choices for a
-    // 3-phase inverter.
+    // current can freewheel through the low-side body diode of
+    // every phase — the standard safe freewheel for a 3-phase
+    // inverter. embassy-stm32 0.6 only exposes two `IdlePolarity`
+    // variants (the timer hardware has no "all Hi-Z" mode through
+    // this register); the "all Hi-Z" we'd ideally want is
+    // achieved by leaving MOE=0 (which the BSP does — see below).
+    // When MOE=0, the timer outputs are in this idle state
+    // regardless of polarity. The uncharged-bootstrap-shoot-through
+    // concern only applies once MOE=1 with both sides switching
+    // and dead-time violated; with MOE=0 the half-bridge is
+    // statically biased and no shoot-through is possible.
     pwm.set_output_idle_state(
         &[embassy_stm32::timer::Channel::Ch1,
           embassy_stm32::timer::Channel::Ch2,

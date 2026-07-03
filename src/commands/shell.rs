@@ -8,10 +8,8 @@
 //!   - `spin <f> <v>`— start open-loop rotating voltage vector
 //!   - `stop`        — soft-stop the open-loop spin
 //!
-//! (The previous `ota_update` command was removed when the y-modem
-//! bootloader was deleted; OTA is now driven over FDCAN1 by the
-//! CANopen + UDS protocol stack — see
-//! `docs/superpowers/specs/2026-07-02-can-ota-uds-design.md`.)
+//! OTA is driven over FDCAN1 by the CANopen + UDS protocol stack — see
+//! `docs/superpowers/specs/2026-07-02-can-ota-uds-design.md`.
 
 use cortex_m::peripheral::SCB;
 use embedded_cli::cli::CliHandle;
@@ -19,6 +17,15 @@ use embedded_cli::cli::CliHandle;
 use crate::bsp::{BOARD_MCU, BOARD_NAME, FLASH_SIZE_KB, SRAM_SIZE_KB};
 use crate::control::cmd::{OpenLoopCmd, OPEN_LOOP_CMD};
 use crate::control::open_loop::MAX_OPENLOOP_V;
+
+/// Maximum electrical frequency the `spin` command will accept, in Hz.
+/// Without a clamp, `spin 1e15 2.0` would put the motor task in the
+/// angle-wrap loop (`while next >= TAU { next -= TAU }`) for hours,
+/// freezing the motor control loop. ~500 Hz is well past anything
+/// a small BLDC would actually see; the spec only calls for an
+/// "electrical frequency of the rotating voltage vector" — anything
+/// beyond a few hundred Hz is garbage from a malformed CLI input.
+const MAX_SPIN_FREQ_HZ: f32 = 500.0;
 
 // ---------------------------------------------------------------------------
 // ShellCommand enum — one variant per shell command
@@ -124,7 +131,13 @@ where
             }
             ShellCommand::Reboot => {
                 let _ = cli.writer().write_str("Rebooting...\r\n");
-                // Brief delay so the message reaches the terminal before reset.
+                // Disable the open-loop spin BEFORE the busy-wait
+                // so the motor task can't keep energising the
+                // phases for the full ~50 ms we're stalled here.
+                // The motor task sees `enabled = false` on its next
+                // tick (well within the delay window) and ramps
+                // voltage to 0 before the NVIC reset tears us down.
+                run_stop(cli);
                 cortex_m::asm::delay(170_000_000 / 20); // ~50 ms at 170 MHz
                 SCB::sys_reset();
             }
@@ -145,10 +158,12 @@ where
 
 /// Handle `spin <freq_hz> <voltage>`.
 ///
-/// Clamps `voltage` to `[0, MAX_OPENLOOP_V]` and warns the user on the
-/// serial line if their input was out of range. Frequency is taken
-/// verbatim — the motor task's `advance_angle` wraps `θ` so any finite
-/// value is safe.
+/// Clamps `freq_hz` magnitude to `[0, MAX_SPIN_FREQ_HZ]` and
+/// `voltage` to `[0, MAX_OPENLOOP_V]`. Warns the user on the serial
+/// line if either input was out of range. Negative frequency is
+/// rejected outright — the angle wrap would just spin the other
+/// way, but `freq_hz` is supposed to be a positive command value
+/// and rejecting makes the contract clearer.
 fn run_spin<W, E>(cli: &mut CliHandle<'_, W, E>, freq_hz: f32, voltage: f32)
 where
     W: embedded_cli::__private::io::Write<Error = E>,
@@ -158,17 +173,27 @@ where
         let _ = cli.writer().write_str("spin: freq/voltage must be finite\r\n");
         return;
     }
+    if freq_hz < 0.0 {
+        let _ = cli.writer().write_str("spin: freq_hz must be ≥ 0; ignored\r\n");
+        return;
+    }
     if voltage < 0.0 {
         let _ = cli.writer().write_str("spin: voltage must be ≥ 0; ignored\r\n");
         return;
     }
-    let clamped = if voltage > MAX_OPENLOOP_V {
+    let clamped_f = if freq_hz > MAX_SPIN_FREQ_HZ {
+        let _ = cli.writer().write_str("spin: freq_hz clamped to MAX_SPIN_FREQ_HZ\r\n");
+        MAX_SPIN_FREQ_HZ
+    } else {
+        freq_hz
+    };
+    let clamped_v = if voltage > MAX_OPENLOOP_V {
         let _ = cli.writer().write_str("spin: voltage clamped to MAX_OPENLOOP_V\r\n");
         MAX_OPENLOOP_V
     } else {
         voltage
     };
-    let cmd = OpenLoopCmd { enabled: true, freq_hz, voltage: clamped };
+    let cmd = OpenLoopCmd { enabled: true, freq_hz: clamped_f, voltage: clamped_v };
     OPEN_LOOP_CMD.lock(|c| c.set(cmd));
     let _ = cli.writer().write_str("spin ok\r\n");
 }

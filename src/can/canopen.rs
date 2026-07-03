@@ -246,8 +246,27 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                         buf
                     };
                     if let Some(response) = sdo::dispatch(&data) {
-                        if let Some(_dropped) = can.write(&response).await {
-                            warn!("CANopen: SDO response replaced a pending frame");
+                        // Wrap the TX in a timeout. If FDCAN1 enters
+                        // bus-off (wiring fault, error storm), the
+                        // embassy write future can pend indefinitely;
+                        // because the canopen task lives in RAM and
+                        // runs at the executor's poll rate, that
+                        // would freeze the motor task (10 kHz PWM)
+                        // too. A 10 ms timeout is generous for a
+                        // 500 kbps bus — even a multi-frame burst
+                        // finishes in well under 1 ms.
+                        let tx = can.write(&response);
+                        match embassy_time::with_timeout(
+                            embassy_time::Duration::from_millis(10),
+                            tx,
+                        ).await {
+                            Ok(Some(_dropped)) => {
+                                warn!("CANopen: SDO response replaced a pending frame");
+                            }
+                            Ok(None) => {} // sent cleanly
+                            Err(_) => {
+                                warn!("CANopen: SDO response TX timed out (bus-off?)");
+                            }
                         }
                         // After sending the SDO response, check
                         // whether a UDS HardReset was requested
@@ -277,8 +296,22 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                 // just continue.
             }
             Either::Second(()) => {
-                if let Some(_dropped) = can.write(&build_heartbeat_frame(state)).await {
-                    warn!("CANopen: heartbeat frame replaced a pending frame");
+                // Same timeout protection as the SDO TX path —
+                // a bus-off heartbeat would otherwise stall the
+                // executor.
+                let hb_frame = build_heartbeat_frame(state);
+                let tx = can.write(&hb_frame);
+                match embassy_time::with_timeout(
+                    embassy_time::Duration::from_millis(10),
+                    tx,
+                ).await {
+                    Ok(Some(_dropped)) => {
+                        warn!("CANopen: heartbeat frame replaced a pending frame");
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        warn!("CANopen: heartbeat TX timed out (bus-off?)");
+                    }
                 }
                 // Reflect a runtime change of 0x1017.0: if the
                 // heartbeat period was updated via SDO, restart

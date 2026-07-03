@@ -15,7 +15,11 @@ foc-algo = { path = "foc-algo" }
 embassy-stm32 = { version = "0.6", features = ["stm32g431cb", "defmt", "time-driver-any", "unstable-pac", "memory-x"] }
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
 
-embassy-time = { version = "0.5", features = ["defmt", "tick-hz-32_768"] }
+# 1 MHz tick rate so `Duration::from_micros(100)` is exactly
+# 100 ticks (no rounding to 3 ticks ≈ 91.5 µs as we'd get at
+# 32 768 Hz). The motor task's 10 kHz cadence stays exactly
+# 10 kHz instead of drifting to 10.93 kHz.
+embassy-time = { version = "0.5", features = ["defmt", "tick-hz-1_000_000"] }
 embassy-futures = "0.1"
 embassy-sync = "0.8"
 embedded-io = "0.7"

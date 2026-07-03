@@ -192,6 +192,18 @@ pub fn handle_transfer_data(payload: &[u8]) -> usize {
     if payload.len() != 3 {
         return store_uds_negative(SID_TRANSFER_DATA, NRC::IncorrectMessageLength);
     }
+    // Reject if the declared image size is already fully delivered.
+    // Without this check, `OTA_REMAINING` would saturate at zero
+    // (the `fetch_update` below uses `saturating_sub`), the OTA
+    // state would stay `Receiving`, and a misbehaving master (or a
+    // replay loop) could keep writing flash at arbitrary offsets
+    // through APP_START..APP_END. TransferExit would then arm the
+    // NVIC reset against a half-written / corrupted image.
+    if OTA_REMAINING.load(Ordering::Relaxed) == 0 {
+        warn!("OTA: TransferData past declared size → 0x31");
+        OTA_STATE.store(OtaState::Idle as u8, Ordering::Relaxed);
+        return store_uds_negative(SID_TRANSFER_DATA, NRC::RequestOutOfRange);
+    }
     let seq = payload[0];
     let expected_seq = NEXT_BLOCK_SEQ.load(Ordering::Relaxed);
     // Per UDS, a wrong block sequence number ⇒ 0x73
@@ -286,6 +298,9 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
 
     // Flush any remaining buffered bytes (padded with 0xFF).
     let next_offset = OTA_NEXT_OFFSET.load(Ordering::Relaxed);
+    let bytes_remaining = OTA_REMAINING.load(Ordering::Relaxed);
+    let total = OTA_TOTAL_SIZE.load(Ordering::Relaxed);
+    let bytes_delivered = total - bytes_remaining;
     let mut flush_error: Option<NRC> = None;
     critical_section::with(|cs| {
         let (buf, len) = &mut *OTA_BUFFER.borrow_ref_mut(cs);
@@ -308,6 +323,25 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
         return store_uds_negative(SID_REQUEST_TRANSFER_EXIT, nrc);
     }
 
+    // Verify the actual bytes delivered matches the declared
+    // size. We allow a partial last block (the trailing flush pads
+    // with 0xFF to the next 8-byte boundary), but anything more than
+    // 7 bytes short of `total` means the master gave up early or
+    // dropped a packet — refuse to mark the image valid in
+    // metadata; the bootloader would refuse it on next boot, but
+    // we'd have wasted a flash write + NVIC reset cycle.
+    if bytes_delivered < total.saturating_sub(7) {
+        warn!(
+            "OTA: short transfer (delivered {} of {}) → 0x72",
+            bytes_delivered, total
+        );
+        OTA_STATE.store(OtaState::Idle as u8, Ordering::Relaxed);
+        return store_uds_negative(
+            SID_REQUEST_TRANSFER_EXIT,
+            NRC::GeneralProgrammingFailure,
+        );
+    }
+
     // Finalise CRC32 (XOR with 0xFFFF_FFFF).
     let mut crc = OTA_CRC32.load(Ordering::Relaxed);
     crc ^= 0xFFFF_FFFF;
@@ -318,12 +352,40 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
         image_size, crc
     );
 
-    // Write the metadata block. We only persist 12 bytes
-    // (magic, size, CRC); the rest of the 2 KB block is
-    // whatever it was before (erased 0xFF, or the previous
-    // OTA's metadata).
-    if unsafe { flash::write_metadata(METADATA_MAGIC, image_size, crc) }
-        .is_err()
+    // Write the metadata block. We persist the full 32-byte
+    // struct: magic, image_size, image_crc, the build-time
+    // version string, and the build timestamp. The build.rs
+    // sets FOC_VERSION + FOC_BUILD_TIMESTAMP as cargo:rustc-env
+    // vars; we copy them into a 16-byte null-padded buffer for
+    // the version field. The reader (src/metadata.rs::read)
+    // rejects blocks where version/timestamp are all-zero or
+    // all-0xFF, so a fresh chip with no OTA yet shows "No
+    // valid metadata" in the boot log instead of stale data.
+    let mut version = [0u8; 16];
+    let vbytes = env!("FOC_VERSION").as_bytes();
+    let copy_len = vbytes.len().min(16);
+    version[..copy_len].copy_from_slice(&vbytes[..copy_len]);
+    let build_ts: u32 = {
+        // FOC_BUILD_TIMESTAMP is a decimal string set by build.rs;
+        // parse it at compile-time-ish (s_to_i is not const, so use a
+        // simple byte-by-byte parser that's good enough for the
+        // 10-digit values we expect).
+        let s = env!("FOC_BUILD_TIMESTAMP");
+        let mut v: u32 = 0;
+        for &b in s.as_bytes() {
+            if b'0' <= b && b <= b'9' {
+                v = v.saturating_mul(10).saturating_add((b - b'0') as u32);
+            } else {
+                break;
+            }
+        }
+        v
+    };
+
+    if unsafe {
+        flash::write_metadata(METADATA_MAGIC, image_size, crc, &version, build_ts)
+    }
+    .is_err()
     {
         warn!("OTA: metadata write failed");
         OTA_STATE.store(OtaState::Idle as u8, Ordering::Relaxed);
