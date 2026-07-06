@@ -34,6 +34,7 @@
 //! UDS side.
 
 pub mod canopen;
+pub mod uds_bridge;
 
 use defmt::info;
 use embassy_stm32::{

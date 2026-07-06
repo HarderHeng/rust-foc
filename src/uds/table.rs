@@ -17,7 +17,6 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use defmt::info;
-use embassy_time::Instant;
 
 use super::crypto::{generate_key, AesBlock};
 use super::pending::{push_pending, PendingFn, UdsContext};
@@ -158,20 +157,14 @@ pub struct UdsConfig {
     /// for most industrial UDS deployments).
     ///
     /// `Some(fn)` — call `f()` every RequestSeed. The function
-    /// must return 16 cryptographically random bytes. On
-    /// STM32G4 with hardware RNG, set this to:
+    /// must return 16 cryptographically random bytes. Example
+    /// using a platform register (e.g., hardware RNG, SysTick
+    /// jitter, or TRNG):
     ///
     /// ```ignore
-    /// fn rng_seed() -> AesBlock {
-    ///     use embassy_stm32::pac::RNG;
-    ///     // Enable RNG (or assert it's already clocked from BSP)
-    ///     RNG.cr().modify(|w| w.set_rngen(true));
+    /// fn my_seed() -> AesBlock {
     ///     let mut seed = [0u8; 16];
-    ///     for chunk in seed.chunks_mut(4) {
-    ///         while !RNG.sr().read().drdy() {}
-    ///         let val = RNG.dr().read().rndata();
-    ///         chunk.copy_from_slice(&val.to_le_bytes());
-    ///     }
+    ///     // Fill `seed` from platform entropy source ...
     ///     AesBlock(seed)
     /// }
     /// ```
@@ -612,17 +605,25 @@ pub enum RoutineSub {
 /// Generate a 16-byte seed for SecurityAccess (0x27).
 ///
 /// Uses the configured `seed_fn` callback if set (`UdsConfig::seed_fn`);
-/// otherwise falls back to fine-grained SysTick jitter, which is
-/// sufficient for most automotive UDS deployments (not HSM-grade).
+/// otherwise falls back to a deterministic-but-changing seed from a
+/// static counter. The counter ensures every RequestSeed in the same
+/// session returns different bytes; it does NOT provide cryptographic
+/// randomness. **Production deployments must configure `seed_fn`** to
+/// point at a true entropy source (hardware RNG or system jitter).
 fn generate_seed(config: &UdsConfig) -> AesBlock {
     if let Some(f) = config.seed_fn {
         return f();
     }
-    // Default: microsecond jitter spread across all 16 bytes.
-    let t = Instant::now().as_micros();
+    // Platform-independent fallback: counter XOR spread across 16 bytes.
+    // Every call returns different bytes, but the sequence is deterministic.
+    // This is fine for development / smoke tests; replace with RNG for
+    // production (see `UdsConfig::seed_fn`).
+    static COUNTER: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    let c = COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let mut seed = [0u8; 16];
-    for i in 0..4 {
-        let v = t.wrapping_mul(0x9E37_79B9u64.wrapping_add(i as u64)) as u32;
+    for i in 0usize..4 {
+        let v = c.wrapping_mul(0x9E37_79B9u32.wrapping_add(i as u32));
         seed[i * 4..(i + 1) * 4].copy_from_slice(&v.to_le_bytes());
     }
     AesBlock(seed)

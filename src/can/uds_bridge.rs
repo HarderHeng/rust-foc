@@ -1,14 +1,10 @@
-//! UDS transport layer — independent of CANopen.
+//! UDS ↔ CAN-FD bridge — platform-specific transport adapter.
 //!
-//! Phase 6 (decoupling) replaced the legacy "UDS over CANopen
-//! SDO 0x2F00.0" tunnel with a direct UDS frame handler on
-//! FDCAN1. This module owns:
-//!
-//! - CAN-ID routing (functional / physical request, physical
-//!   response)
-//! - Single-frame UDS dispatch (1 CAN frame per request/response)
-//! - Bridge between raw CAN frames and the UDS dispatcher in
-//!   `super`
+//! This file is the **only** place in the firmware that knows about
+//! CAN-FD frame types. It lives in `src/can/` (the bus layer), NOT
+//! in `src/uds/` (the application layer), because the UDS library
+//! must be a pure application-layer library with zero hardware
+//! dependencies.
 //!
 //! ## CAN-ID layout (ISO 14229-3 §7)
 //!
@@ -18,17 +14,20 @@
 //! | Physical request   | 0x7E0 | our ECU address (1) |
 //! | Physical response  | 0x7E8 | 0x7E0 + 8 (per ISO 14229-3) |
 //!
-//! `transport::handle_rx_frame` is called from `canopen_task`
-//! for every received CAN frame whose ID falls in the UDS
-//! range. It builds a UDS request slice, dispatches to the
-//! UDS engine, and (on Ready) returns the response frame for
-//! `canopen_task` to TX.
+//! ## Porting to a different transport
+//!
+//! Replace this file entirely. The UDS library exposes a clean API:
+//!
+//! - `crate::uds::dispatch(request)` — process a request, store response
+//! - `crate::uds::load_response()` — read the response bytes
+//! - `crate::uds::tick(now_ms)` — drive the pending queue
+//! - `crate::uds::tx_disabled()` — check if TX is suppressed
 
 use embassy_stm32::can::frame::FdFrame;
 use embedded_can::Id;
 
 use crate::uds;
-use super::state::load_response;
+use crate::uds::state::load_response;
 
 // ============================================================================
 // CAN-ID routing
@@ -49,17 +48,15 @@ fn is_uds_request_id(id: u16) -> bool {
     id == COB_ID_FUNCTIONAL_REQUEST || id == COB_ID_PHYSICAL_REQUEST
 }
 
-/// Map a request COB-ID to the response COB-ID the ECU
-/// should reply on. Both functional and physical requests
-/// get the physical response ID (each responding ECU
-/// replies individually).
+/// Map a request COB-ID to the response COB-ID the ECU should
+/// reply on. Both functional and physical requests respond on
+/// the physical response ID.
 fn response_id_for_request(_request_id: u16) -> u16 {
     COB_ID_PHYSICAL_RESPONSE
 }
 
 /// True iff the given frame is addressed to one of our UDS
 /// request COB-IDs (functional 0x7DF or physical 0x7E0).
-/// `canopen_task` uses this to route RX frames.
 pub fn is_uds_frame(frame: &FdFrame) -> bool {
     let id = match frame.header().id() {
         Id::Standard(s) => s.as_raw(),
@@ -72,20 +69,15 @@ pub fn is_uds_frame(frame: &FdFrame) -> bool {
 // Frame construction / parsing
 // ============================================================================
 
-/// Maximum bytes per UDS frame. CAN-FD is 64 bytes (vs 8 on
-/// classic CAN). Phase 6 commit 2 uses CAN-FD exclusively
-/// for UDS.
+/// Maximum bytes per UDS frame. CAN-FD is 64 bytes.
 const UDS_FRAME_MAX: usize = 64;
 
 /// Build the UDS response frame for a given request COB-ID.
-/// Reads the last response from the UDS engine's response
-/// buffer and wraps it in a CAN-FD frame on the appropriate
-/// response COB-ID.
+/// Reads the last response from the UDS engine and wraps it in
+/// a CAN-FD frame on the appropriate response COB-ID.
 ///
 /// Returns `None` if the response is empty (e.g. 0x3E 0x80
 /// suppress positive response).
-#[inline(never)]
-#[link_section = ".data"]
 fn build_response_frame(request_id: u16) -> Option<FdFrame> {
     let (bytes, len) = load_response();
     if len == 0 {
@@ -108,16 +100,10 @@ fn parse_request_frame<'a>(frame: &'a FdFrame) -> &'a [u8] {
 // Main entry point called from canopen_task
 // ============================================================================
 
-/// Handle one received UDS request frame (Phase 6 commit 2:
-/// CAN-FD, 64-byte max). The frame must pass `is_uds_frame`
-/// (checked by the caller). Builds the UDS request slice,
-/// runs the UDS dispatcher, and returns the response frame.
-///
-/// **Lives in `.data` (RAM).** Called from `canopen_task` for
-/// every UDS request. Keeping the entire UDS receive path
-/// off the OTA write path is the same rationale as Phase 4.
-#[inline(never)]
-#[link_section = ".data"]
+/// Handle one received UDS request frame (CAN-FD, 64-byte max).
+/// The frame must pass `is_uds_frame` (checked by the caller).
+/// Builds the UDS request slice, runs the dispatcher, and
+/// returns the response frame.
 pub fn handle_rx_frame(frame: &FdFrame) -> Option<FdFrame> {
     let id = match frame.header().id() {
         Id::Standard(s) => s.as_raw(),

@@ -1,12 +1,10 @@
 //! UDS (ISO 14229) — application layer protocol.
 //!
-//! **Layering**: UDS is transport-agnostic. It lives in `src/uds/`
-//! at the top level (NOT under `src/can/`) because the
-//! application layer should not depend on the physical / data
-//! link layer that happens to carry it. The CAN-specific
-//! transport adapter is in `src/uds/transport.rs` — the only
-//! place in the UDS module that imports embassy-stm32's
-//! FDCAN frame types.
+//! **Layering**: UDS is a pure application-layer protocol with
+//! zero hardware dependencies. This module compiles on any target
+//! (Cortex-M, RISC-V, x86_64 Linux, etc.) with only `core` and
+//! the `aes` crate. Platform-specific transport adapters live
+//! OUTSIDE this module (e.g. `src/can/uds_bridge.rs` for CAN-FD).
 //!
 //! ## Module map
 //!
@@ -15,9 +13,8 @@
 //! - `table.rs`        — `UdsConfig` schema + `impl UdsConfig { dispatch_0xNN }`
 //!                       (the *only* place that knows per-SID wire format)
 //! - `static_config.rs`— the static `UDS_CONFIG` instance + callback fns
-//! - `crypto.rs`       — LFSR + bit reversal (pure functions, unit-tested)
+//! - `crypto.rs`       — AES-128 key derivation (pure functions, unit-tested)
 //! - `pending.rs`      — pending queue + 0x78 ResponsePending
-//! - `transport.rs`    — CAN-specific transport adapter
 //!
 //! ## Adding a new SID
 //!
@@ -39,7 +36,6 @@ pub mod pending;
 pub mod state;
 pub mod static_config;
 pub mod table;
-pub mod transport;
 pub mod types;
 
 use state::{store_response, UdsState};
@@ -74,16 +70,14 @@ pub fn response_ready() -> bool {
 }
 
 /// Dispatch a UDS request. `request[0]` is the SID. The
-/// response is stored in the shared buffer; the canopen task
-/// reads it after the dispatch returns (sync case) or after
-/// the pending queue's `tick` (async OTA case).
+/// response is stored in the shared buffer; the caller reads
+/// it via `state::load_response()` after the dispatch returns.
 ///
-/// **Lives in `.data` (RAM).** Called from
-/// `transport::handle_rx_frame` on every UDS request. Keeping
-/// the dispatch chain in RAM means the entire UDS path stays
-/// off the OTA write path.
-#[inline(never)]
-#[link_section = ".data"]
+/// This is the sole public entry point into the UDS engine.
+/// It is platform-independent and transport-agnostic: it takes
+/// a `&[u8]` request and produces a response in the internal
+/// buffer. The transport adapter (e.g. `src/can/uds_bridge.rs`)
+/// calls this with the decoded payload.
 pub fn dispatch(request: &[u8]) {
     let state = unsafe { &mut *(&raw const UDS_STATE as *mut UdsState) };
 
