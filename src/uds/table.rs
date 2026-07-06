@@ -293,31 +293,13 @@ impl UdsConfig {
     // -- 0x14 ClearDiagnosticInformation ------------------------------
 
     pub fn dispatch_0x14(&self, _state: &mut UdsState, req: &[u8]) {
-        // [0x14, group(3)] → [0x54]. No DTCs in v1.
-        if req.len() != 4 {
-            store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
-                .negative_response(0x14));
-            return;
-        }
-        store_response(&[0x54]);
+        super::dtc::handle_clear(req);
     }
 
     // -- 0x19 ReadDTCInformation -------------------------------------
 
     pub fn dispatch_0x19(&self, _state: &mut UdsState, req: &[u8]) {
-        // [0x19, subfunc, status_mask] → [0x59, subfunc, avail, fmt]
-        if req.len() < 3 {
-            store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
-                .negative_response(0x19));
-            return;
-        }
-        let subfunc = req[1];
-        if subfunc != 0x02 {
-            store_response(&Nrc::SubFunctionNotSupported.negative_response(0x19));
-            return;
-        }
-        info!("UDS: ReadDTC(subfunc=0x02) → 0 DTCs");
-        store_response(&[0x59, 0x02, 0x00, 0x00]);
+        super::dtc::handle_read(req);
     }
 
     // -- 0x22 ReadDataByIdentifier -----------------------------------

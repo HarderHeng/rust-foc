@@ -32,6 +32,7 @@
 use defmt::info;
 
 pub mod crypto;
+pub mod dtc;
 pub mod pending;
 pub mod state;
 pub mod static_config;

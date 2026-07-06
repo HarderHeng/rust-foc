@@ -1,5 +1,12 @@
 //! Minimal CANopen — NMT state machine + heartbeat producer.
 //!
+//! ## Fault detection (DTC)
+//!
+//! This task monitors CAN bus communication health and records DTCs
+//! via `crate::uds::dtc::set_dtc`:
+//!
+//! - `0x030100` — CAN communication timeout (>10 s with no frame).
+//!
 //! Phase 1 only ships the *bare minimum* for a node to be visible
 //! on the bus: it boots up, sends a one-shot boot-up message, then
 //! emits a 1 Hz heartbeat so a master can see it in `candump`. The
@@ -44,6 +51,8 @@ use embassy_time::{Duration, Ticker};
 
 use crate::ota;
 use crate::uds;
+use crate::uds::dtc;
+use embassy_time::Instant;
 use crate::drivers::can::uds_bridge as uds_transport;
 
 /// Heartbeat producer period in milliseconds. Was previously
@@ -196,6 +205,12 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
     // (period = 0). We re-evaluate this at the top of each
     // loop iteration so period changes take effect on the
     // next tick (or the next frame).
+    // DTC: CAN communication timeout threshold (10 s without a frame).
+    const CAN_TIMEOUT_MS: u64 = 10_000;
+    const DTC_CAN_TIMEOUT: u32 = 0x030100;  // U0100-family proprietary
+    let mut last_rx = Instant::now();
+    let mut dtc_timeout_recorded = false;
+
     let initial_period = heartbeat_period_ms();
     LAST_HEARTBEAT_PERIOD_MS.store(initial_period, Ordering::Relaxed);
     let mut heartbeat: Option<Ticker> = if initial_period > 0 {
@@ -241,6 +256,12 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
         };
         match select(rx_fut, tick_fut).await {
             Either::First(Ok(envelope)) => {
+                last_rx = Instant::now();
+                if dtc_timeout_recorded {
+                    dtc_timeout_recorded = false;
+                    dtc::clear_dtc(DTC_CAN_TIMEOUT);
+                    info!("CANopen: communication restored, DTC cleared");
+                }
                 let frame = envelope.frame;
                 // CANopen uses 11-bit standard IDs exclusively.
                 // Extended IDs are silently dropped.
@@ -325,6 +346,14 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                 // just continue.
             }
             Either::Second(()) => {
+                // DTC: check CAN communication timeout.
+                if last_rx.elapsed().as_millis() >= CAN_TIMEOUT_MS && !dtc_timeout_recorded {
+                    dtc_timeout_recorded = true;
+                    dtc::set_dtc(DTC_CAN_TIMEOUT, dtc::status::CONFIRMED
+                                 | dtc::status::TEST_FAILED_CURRENT);
+                    warn!("CANopen: no frame for {} ms — DTC 0x{:06x} recorded",
+                          CAN_TIMEOUT_MS, DTC_CAN_TIMEOUT);
+                }
                 // Phase 5c: if 0x28 disableNormalCommunication
                 // is active, skip the heartbeat (TX is muted).
                 if !crate::uds::tx_disabled() {

@@ -295,6 +295,9 @@ class FirmwareEmulator:
         # Key masks (matching Rust UDS_CONFIG.key_masks defaults).
         self.key_masks = [KEY_MASK_SAL1, KEY_MASK_SAL2, KEY_MASK_SAL3]
 
+        # DTC storage: list of (code, status) tuples.
+        self.dtcs: list[tuple[int, int]] = []
+
         # OTA state
         self.ota_state = 'Idle'
         self.ota_total = 0
@@ -608,13 +611,30 @@ class FirmwareEmulator:
         if len(p) != 3:
             self.last_response = bytes([0x7F, SID_CDI, NRC_INCORRECT_MESSAGE_LENGTH])
             return
+        self.dtcs.clear()
         self.last_response = bytes([SID_CDI + 0x40])
 
     def _uds_rdtci(self, p: bytes) -> None:
         if len(p) < 2 or p[0] != 0x02:
             self.last_response = bytes([0x7F, SID_RDTCI, NRC_SUB_FUNC_NOT_SUPPORTED])
             return
-        self.last_response = bytes([SID_RDTCI + 0x40, 0x02, 0x00, 0x00])
+        status_mask = p[1]
+        matching = [(c, s) for c, s in self.dtcs if s & status_mask]
+        count = len(matching)
+        out = bytearray(5 + count * 4)
+        out[0] = SID_RDTCI + 0x40
+        out[1] = 0x02
+        out[2] = 0xFE  # statusAvailability
+        out[3] = (count >> 8) & 0xFF
+        out[4] = count & 0xFF
+        for i, (code, st) in enumerate(matching):
+            off = 5 + i * 4
+            code_bytes = code.to_bytes(3, 'big')
+            out[off]     = code_bytes[0]
+            out[off + 1] = code_bytes[1]
+            out[off + 2] = code_bytes[2]
+            out[off + 3] = st
+        self.last_response = bytes(out)
 
     def _uds_rdbi(self, p: bytes) -> None:
         if len(p) != 2:
@@ -1407,6 +1427,30 @@ def s_uds_transport_no_sdo_dependency(bus: Bus) -> None:
             f"still using SDO tunnel?")
 
 
+def s_uds_dtc_basic(bus: Bus) -> None:
+    """DTC read/clear cycle: inject → read → clear → read zero."""
+    drv = MasterDriver(bus)
+    # Inject a DTC directly into the emulator (sim mode only; in live
+    # mode DTCs are triggered by the CAN timeout monitor in
+    # canopen_task, which takes 10 s).
+    if isinstance(bus, SimBus):
+        bus.fw.dtcs.append((0x030100, 0x05))
+    # Read by status mask 0xFF → expect 1 DTC.
+    resp = drv.send_uds(bytes([SID_RDTCI, 0x02, 0xFF]))
+    _assert(len(resp) == 9, f"ReadDTC resp len {len(resp)} (expected 9 = 5 header + 1×4)")
+    assert_bytes(resp[:5], bytes([SID_RDTCI + 0x40, 0x02, 0xFE, 0x00, 0x01]),
+                 "DTC report header (1 DTC)")
+    assert_bytes(resp[5:9], bytes([0x03, 0x01, 0x00, 0x05]),
+                 "DTC record: 0x030100 status 0x05")
+    # Clear DTCs.
+    resp = drv.send_uds(bytes([SID_CDI, 0xFF, 0xFF, 0xFF]))
+    assert_bytes(resp, bytes([SID_CDI + 0x40]), "ClearDiagnosticInformation")
+    # Read again → 0 DTCs.
+    resp = drv.send_uds(bytes([SID_RDTCI, 0x02, 0xFF]))
+    assert_bytes(resp, bytes([SID_RDTCI + 0x40, 0x02, 0xFE, 0x00, 0x00]),
+                 "DTC report header (0 DTCs)")
+
+
 def s_uds_session_default(bus: Bus) -> None:
     """DiagnosticSessionControl 0x10 0x01 → 0x50 0x01."""
     drv = MasterDriver(bus)
@@ -1692,6 +1736,7 @@ SCENARIOS: dict[str, callable] = {
     # round-trip an empty SDO read. Tracked as a known
     # limitation; full coverage needs a TP-only scenario that
     # bypasses SDO and uses a direct UDS dispatcher call.
+    "uds_dtc":             s_uds_dtc_basic,
     "uds_session":         s_uds_session_default,
     "uds_security":        s_uds_security_unlock,
     "uds_security_sal2":   s_uds_security_sal2,
