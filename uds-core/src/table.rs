@@ -548,6 +548,62 @@ impl UdsConfig {
             store_response(&Nrc::SubFunctionNotSupported.negative_response(0x3E));
         }
     }
+
+    // ===================================================================
+    // Top-level dispatch — route a raw request to the right handler
+    // ===================================================================
+
+    /// Look up `request[0]` in the service table, gate on session +
+    /// security, copy the request into `state.request_buf`, and call
+    /// the matching `dispatch_0xNN` method.
+    ///
+    /// This is the single entry point for the platform's transport
+    /// adapter — see `src/uds/mod.rs` in the foc-rust project.
+    pub fn dispatch_sid(&mut self, state: &mut UdsState, request: &[u8]) {
+        if request.is_empty() {
+            return;
+        }
+        let sid = request[0];
+        let entry = match self.services.iter().find(|e| e.sid == sid) {
+            Some(e) => e,
+            None => {
+                store_response(&Nrc::ServiceNotSupported.negative_response(sid));
+                return;
+            }
+        };
+        if !session_allowed(state.session, entry.session_access) {
+            store_response(&Nrc::ServiceNotSupportedInActiveSession
+                .negative_response(sid));
+            return;
+        }
+        if !security_allowed(state.security, entry.security_level) {
+            store_response(&Nrc::SecurityAccessDenied.negative_response(sid));
+            return;
+        }
+        // Copy request bytes so pending-queue closures can read
+        // them via `UdsContext`.
+        state.request_len = request.len();
+        state.request_buf[..request.len()].copy_from_slice(request);
+
+        match entry.handler {
+            ServiceHandler::Session        => self.dispatch_0x10(state, request),
+            ServiceHandler::EcuReset       => self.dispatch_0x11(state, request),
+            ServiceHandler::ClearDtc       => self.dispatch_0x14(state, request),
+            ServiceHandler::ReadDtc        => self.dispatch_0x19(state, request),
+            ServiceHandler::ReadDataById   => self.dispatch_0x22(state, request),
+            ServiceHandler::WriteDataById  => self.dispatch_0x2e(state, request),
+            ServiceHandler::CommControl    => self.dispatch_0x28(state, request),
+            ServiceHandler::SecurityAccess => self.dispatch_0x27(state, request),
+            ServiceHandler::RoutineStart   => self.dispatch_0x31(state, request, RoutineSub::Start),
+            ServiceHandler::RoutineStop    => self.dispatch_0x31(state, request, RoutineSub::Stop),
+            ServiceHandler::RoutineResult  => self.dispatch_0x31(state, request, RoutineSub::Result),
+            ServiceHandler::RequestDownload => { let _ = self.dispatch_0x34(state); }
+            ServiceHandler::TransferData   => { let _ = self.dispatch_0x36(state); }
+            ServiceHandler::TransferExit   => { let _ = self.dispatch_0x37(state); }
+            ServiceHandler::TesterPresent  => self.dispatch_0x3e(state, request),
+        }
+        uds_log!("UDS: dispatched SID 0x{:02x}", sid);
+    }
 }
 
 // ============================================================================
