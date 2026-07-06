@@ -152,6 +152,31 @@ pub struct UdsConfig {
     pub on_default_session_enter: Option<fn()>,
     pub on_programming_session_enter: Option<fn()>,
     pub on_extended_session_enter: Option<fn()>,
+
+    /// Seed-generation callback for SecurityAccess (0x27).
+    ///
+    /// `None` — use the built-in SysTick jitter (good enough
+    /// for most industrial UDS deployments).
+    ///
+    /// `Some(fn)` — call `f()` every RequestSeed. The function
+    /// must return 16 cryptographically random bytes. On
+    /// STM32G4 with hardware RNG, set this to:
+    ///
+    /// ```ignore
+    /// fn rng_seed() -> AesBlock {
+    ///     use embassy_stm32::pac::RNG;
+    ///     // Enable RNG (or assert it's already clocked from BSP)
+    ///     RNG.cr().modify(|w| w.set_rngen(true));
+    ///     let mut seed = [0u8; 16];
+    ///     for chunk in seed.chunks_mut(4) {
+    ///         while !RNG.sr().read().drdy() {}
+    ///         let val = RNG.dr().read().rndata();
+    ///         chunk.copy_from_slice(&val.to_le_bytes());
+    ///     }
+    ///     AesBlock(seed)
+    /// }
+    /// ```
+    pub seed_fn: Option<fn() -> AesBlock>,
 }
 
 // ============================================================================
@@ -368,7 +393,7 @@ impl UdsConfig {
             return;
         }
         if is_request_seed {
-            sa_request_seed(state, sal, req[1]);
+            sa_request_seed(state, self, sal, req[1]);
         } else {
             sa_send_key(state, self, sal, req[1], req);
         }
@@ -538,23 +563,17 @@ pub enum RoutineSub {
     Result,
 }
 
-/// Generate a non-deterministic 16-byte seed from timing jitter.
-/// 170 MHz Cortex-M → ~6 ns per tick; consecutive UDS dispatches
-/// land on different cycle counts because the canopen_task races
-/// the heartbeat ticker against incoming frames.
+/// Generate a 16-byte seed for SecurityAccess (0x27).
 ///
-/// This is not HSM-grade randomness, but it makes replay attacks
-/// meaningless: the seed changes every RequestSeed, so even if an
-/// attacker observes one seed/key pair, the next session uses a
-/// different seed → different key.
-///
-/// **RNG offload**: this uses fine-grained SysTick jitter, which
-/// is sufficient for automotive UDS seed-key. If the platform
-/// has a hardware RNG, replace this body with `rng_read_seed()`.
-fn generate_seed() -> AesBlock {
+/// Uses the configured `seed_fn` callback if set (`UdsConfig::seed_fn`);
+/// otherwise falls back to fine-grained SysTick jitter, which is
+/// sufficient for most automotive UDS deployments (not HSM-grade).
+fn generate_seed(config: &UdsConfig) -> AesBlock {
+    if let Some(f) = config.seed_fn {
+        return f();
+    }
+    // Default: microsecond jitter spread across all 16 bytes.
     let t = Instant::now().as_micros();
-    // Spread the microsecond counter across all 16 bytes using
-    // multiplicative mixing to avoid repeating patterns.
     let mut seed = [0u8; 16];
     for i in 0..4 {
         let v = t.wrapping_mul(0x9E37_79B9u64.wrapping_add(i as u64)) as u32;
@@ -586,7 +605,7 @@ fn sal_session_allowed(sal: u8, session: Session) -> bool {
     }
 }
 
-fn sa_request_seed(state: &mut UdsState, sal: u8, subfunc: u8) {
+fn sa_request_seed(state: &mut UdsState, config: &UdsConfig, sal: u8, subfunc: u8) {
     if (state.security as u8) >= sal {
         // Already unlocked at this SAL (or higher): ISO 14229
         // says positive response with a zero seed.
@@ -596,7 +615,7 @@ fn sa_request_seed(state: &mut UdsState, sal: u8, subfunc: u8) {
         store_response(&zero);
         return;
     }
-    let seed = generate_seed();
+    let seed = generate_seed(config);
     state.current_seed = seed.0;
     state.seed_sent = true;
     let mut resp = [0u8; 18];

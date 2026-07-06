@@ -171,5 +171,5 @@ pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     on_default_session_enter: None,
     on_programming_session_enter: None,
     on_extended_session_enter: None,
+    seed_fn: None,
 };
-
