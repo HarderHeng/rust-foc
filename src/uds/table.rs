@@ -23,7 +23,6 @@ use super::crypto::{generate_key, AesBlock};
 use super::pending::{push_pending, PendingFn, UdsContext};
 use super::state::{store_response, UdsState};
 use super::types::{Nrc, SecurityLevel, Session};
-use crate::ota;
 
 // ============================================================================
 // Schema types — the *shape* of the tables
@@ -177,6 +176,32 @@ pub struct UdsConfig {
     /// }
     /// ```
     pub seed_fn: Option<fn() -> AesBlock>,
+
+    /// Key-derivation callback for SecurityAccess (0x27).
+    ///
+    /// `None` — use the built-in AES-128-ECB.
+    ///
+    /// `Some(fn)` — called every SendKey with `(seed, key_material)`,
+    /// must return the derived 16-byte key. Enables custom algorithms
+    /// (proprietary cipher, custom LFSR, XOR, etc.) without touching
+    /// the UDS core.
+    pub key_fn: Option<fn(&AesBlock, &AesBlock) -> AesBlock>,
+
+    /// OTA callbacks for 0x34/0x36/0x37 (pending queue).
+    ///
+    /// `None` — the corresponding SID returns 0x22 (not accepted).
+    ///
+    /// `Some(fn)` — called from the pending queue closure. The
+    /// function reads request bytes from `ctx.state.request_buf`,
+    /// performs the flash operation, and sets `ctx.complete = true`
+    /// when done.
+    ///
+    /// Separate from `on_*_session_enter` / `seed_fn` / `key_fn`
+    /// because OTA is an optional feature — not every UDS user
+    /// has an OTA module or uses flash-based download.
+    pub request_download_fn: Option<fn(&mut UdsContext)>,
+    pub transfer_data_fn: Option<fn(&mut UdsContext)>,
+    pub transfer_exit_fn: Option<fn(&mut UdsContext)>,
 }
 
 // ============================================================================
@@ -496,18 +521,25 @@ impl UdsConfig {
 
     // -- 0x34 / 0x36 / 0x37 OTA path (push to pending queue) --------
 
-    /// 0x34 RequestDownload. Returns `false` if the request
-    /// didn't validate (response is stashed in the shared buffer).
+    /// 0x34 RequestDownload (OTA). Pushes the registered
+    /// `request_download_fn` onto the pending queue.
+    /// Returns `false` if validation fails or no callback set.
     pub fn dispatch_0x34(&mut self, state: &mut UdsState) -> bool {
         let req = &state.request_buf[..state.request_len];
         if req.len() != 6 || req[1] != 0x00 {
             store_response(&Nrc::RequestOutOfRange.negative_response(0x34));
             return false;
         }
-        push_pending(state, self, pending_erase as PendingFn)
+        match self.request_download_fn {
+            Some(f) => push_pending(state, self, f as PendingFn),
+            None => {
+                store_response(&Nrc::RequestOutOfRange.negative_response(0x34));
+                false
+            }
+        }
     }
 
-    /// 0x36 TransferData.
+    /// 0x36 TransferData (OTA).
     pub fn dispatch_0x36(&mut self, state: &mut UdsState) -> bool {
         let req = &state.request_buf[..state.request_len];
         if req.len() != 4 {
@@ -515,10 +547,17 @@ impl UdsConfig {
                 .negative_response(0x36));
             return false;
         }
-        push_pending(state, self, pending_transfer as PendingFn)
+        match self.transfer_data_fn {
+            Some(f) => push_pending(state, self, f as PendingFn),
+            None => {
+                store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
+                    .negative_response(0x36));
+                false
+            }
+        }
     }
 
-    /// 0x37 TransferExit.
+    /// 0x37 TransferExit (OTA).
     pub fn dispatch_0x37(&mut self, state: &mut UdsState) -> bool {
         let req = &state.request_buf[..state.request_len];
         if !req.is_empty() {
@@ -526,7 +565,14 @@ impl UdsConfig {
                 .negative_response(0x37));
             return false;
         }
-        push_pending(state, self, pending_exit as PendingFn)
+        match self.transfer_exit_fn {
+            Some(f) => push_pending(state, self, f as PendingFn),
+            None => {
+                store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
+                    .negative_response(0x37));
+                false
+            }
+        }
     }
 
     // -- 0x3E TesterPresent ------------------------------------------
@@ -641,10 +687,11 @@ fn sa_send_key(state: &mut UdsState, config: &UdsConfig, sal: u8,
     state.seed_sent = false;
     let mut rx_key = [0u8; 16];
     rx_key.copy_from_slice(&req[2..18]);
-    let expected = generate_key(
-        &AesBlock(state.current_seed),
-        &config.key_masks[(sal - 1) as usize],
-    );
+    let expected = if let Some(f) = config.key_fn {
+        f(&AesBlock(state.current_seed), &config.key_masks[(sal - 1) as usize])
+    } else {
+        generate_key(&AesBlock(state.current_seed), &config.key_masks[(sal - 1) as usize])
+    };
     if rx_key != expected.0 {
         info!("UDS: SecurityAccess SAL{} wrong key", sal);
         store_response(&Nrc::InvalidKey.negative_response(0x27));
@@ -655,34 +702,6 @@ fn sa_send_key(state: &mut UdsState, config: &UdsConfig, sal: u8,
     store_response(&[subfunc + 0x40, subfunc]);
 }
 
-// ============================================================================
-// Pending-queue closures for 0x34/0x36/0x37 (OTA path)
-// ============================================================================
-//
-// Closure model: `fn` pointer (no env capture) — keeps the
-// `PendingJob` slot `Copy` and avoids a global allocator. The
-// request bytes are in `state.request_buf[0..state.request_len]`
-// (set at the start of `dispatch`); the closure reads from
-// there.
-
-fn pending_erase(ctx: &mut UdsContext) {
-    let req = &ctx.state.request_buf[..ctx.state.request_len];
-    ota::handle_request_download(&req[1..]);
-    ctx.complete = true;
-}
-
-fn pending_transfer(ctx: &mut UdsContext) {
-    let req = &ctx.state.request_buf[..ctx.state.request_len];
-    ota::handle_transfer_data(&req[1..]);
-    ctx.complete = true;
-}
-
-fn pending_exit(ctx: &mut UdsContext) {
-    ota::handle_transfer_exit(&[]);
-    ctx.complete = true;
-}
-
-// `mod.rs` matches on `ServiceHandler` and dispatches to
-// `config.dispatch_0xNN`. We don't have a `dispatch_any` to
-// keep the per-SID call sites explicit (so reviewers can see
-// the exact wire-format contract per call).
+// OTA pending closures live in `static_config.rs`, registered via
+// `UdsConfig::request_download_fn / transfer_data_fn / transfer_exit_fn`.
+// When `None`, the SID returns 0x22 — zero OTA coupling.

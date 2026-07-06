@@ -11,7 +11,9 @@
 //! holds a closure (not `Sync`); the `unsafe` is required at
 //! the static initializer.
 
+use crate::ota;
 use crate::uds::crypto::AesBlock;
+use crate::uds::pending::UdsContext;
 use crate::uds::table::{DidReadEntry, DidWriteEntry, RoutineEntry,
                           ServiceEntry, ServiceHandler, UdsConfig};
 use crate::uds::types::Nrc;
@@ -138,13 +140,30 @@ static ROUTINES_RESULT: &[RoutineEntry] = &[
     },
 ];
 
+// ---- OTA callbacks (registered into UDS_CONFIG below) -------------------
+
+fn ota_request_download(ctx: &mut UdsContext) {
+    let req = &ctx.state.request_buf[..ctx.state.request_len];
+    ota::handle_request_download(&req[1..]);
+    ctx.complete = true;
+}
+
+fn ota_transfer_data(ctx: &mut UdsContext) {
+    let req = &ctx.state.request_buf[..ctx.state.request_len];
+    ota::handle_transfer_data(&req[1..]);
+    ctx.complete = true;
+}
+
+fn ota_transfer_exit(ctx: &mut UdsContext) {
+    ota::handle_transfer_exit(&[]);
+    ctx.complete = true;
+}
+
 // ---- The single static instance -----------------------------------------
 
-/// LFSR masks per SAL. Index 0/1/2 = SAL1/2/3. Pick any
-/// non-zero 32-bit value; the LFSR cycle is then unique to
-/// that mask. The smoke tests expect the existing seed/key
-/// pairs derived from these masks — see
-/// `scripts/smoke_test.py::_lfsr_key`.
+/// AES-128 key material per SAL. Index 0/1/2 = SAL1/2/3.
+/// Writable at runtime via DID 0xF180. The smoke tests expect
+/// these default values — see `scripts/smoke_test.py`.
 pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     services: SERVICES,
     read_dids: READ_DIDS,
@@ -172,4 +191,8 @@ pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     on_programming_session_enter: None,
     on_extended_session_enter: None,
     seed_fn: None,
+    key_fn: None,
+    request_download_fn: Some(ota_request_download),
+    transfer_data_fn: Some(ota_transfer_data),
+    transfer_exit_fn: Some(ota_transfer_exit),
 };
