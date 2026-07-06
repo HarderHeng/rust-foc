@@ -20,8 +20,8 @@
 use defmt::info;
 use embassy_time::Ticker;
 
-use crate::control::cmd::{OpenLoopCmd, OPEN_LOOP_CMD};
-use crate::control::open_loop::OpenLoop;
+use crate::motor::cmd::{OpenLoopCmd, OPEN_LOOP_CMD};
+use crate::motor::open_loop::OpenLoop;
 use crate::drivers::motor_pwm::MotorPwm;
 use foc_algo::LibmTrig;
 

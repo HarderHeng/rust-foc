@@ -2,13 +2,11 @@
 #![no_main]
 
 mod bsp;
-mod can;
-mod commands;
-mod control;
 mod drivers;
-mod hal;
 mod metadata;
+mod motor;
 mod ota;
+mod shell;
 mod tasks;
 mod uds;
 

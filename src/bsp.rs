@@ -23,7 +23,7 @@ use embassy_stm32::{
     Config as HalConfig, Peripherals,
 };
 
-use crate::can::init_fdcan1;
+use crate::drivers::can::init_fdcan1;
 use crate::drivers::debug_uart::Uart2Sink;
 use crate::drivers::motor_pwm::MotorPwm;
 

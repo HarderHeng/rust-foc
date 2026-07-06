@@ -37,12 +37,13 @@
 //!   triggers NVIC reset. On the next boot the metadata is
 //!   already valid; no special "first-boot" branch needed.
 
+pub mod flash;
+
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use critical_section::Mutex;
 use defmt::{info, warn};
 
-use crate::hal::flash;
 
 // ---- UDS service IDs (subset) -----------------------------------------
 

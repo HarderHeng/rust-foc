@@ -20,7 +20,7 @@ use core::f32::consts::TAU;
 #[allow(unused_imports)]
 use foc_algo::{Duty, LibmTrig, Ramp, Svpwm, Trig};
 
-use crate::control::cmd::OpenLoopCmd;
+use crate::motor::cmd::OpenLoopCmd;
 
 /// Hard upper bound on the peak phase voltage the open-loop path will
 /// ever command.  Defined in the milestone 1 spec; the shell also clamps

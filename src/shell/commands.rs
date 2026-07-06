@@ -15,8 +15,8 @@ use cortex_m::peripheral::SCB;
 use embedded_cli::cli::CliHandle;
 
 use crate::bsp::{BOARD_MCU, BOARD_NAME, FLASH_SIZE_KB, SRAM_SIZE_KB};
-use crate::control::cmd::{OpenLoopCmd, OPEN_LOOP_CMD};
-use crate::control::open_loop::MAX_OPENLOOP_V;
+use crate::motor::cmd::{OpenLoopCmd, OPEN_LOOP_CMD};
+use crate::motor::open_loop::MAX_OPENLOOP_V;
 
 /// Maximum electrical frequency the `spin` command will accept, in Hz.
 /// Without a clamp, `spin 1e15 2.0` would put the motor task in the

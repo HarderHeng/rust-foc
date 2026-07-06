@@ -44,7 +44,7 @@ use embassy_time::{Duration, Ticker};
 
 use crate::ota;
 use crate::uds;
-use crate::can::uds_bridge as uds_transport;
+use crate::drivers::can::uds_bridge as uds_transport;
 
 /// Heartbeat producer period in milliseconds. Was previously
 /// in `src/can/od.rs` (deleted in Phase 6 along with the

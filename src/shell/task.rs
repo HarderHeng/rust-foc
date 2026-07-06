@@ -14,7 +14,7 @@ use embassy_stm32::usart::{BufferedUartRx, BufferedUartTx};
 use embedded_cli::__private::io as eio06;
 use embedded_io_async::Read;
 
-use crate::commands::shell::{make_processor, ShellCommand};
+use crate::shell::commands::{make_processor, ShellCommand};
 use crate::drivers::debug_uart::UsartError06;
 
 const CMD_BUF_SIZE: usize = 64;
