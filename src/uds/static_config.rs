@@ -1,23 +1,25 @@
 //! Static `UdsConfig` instance + the callback functions
 //! referenced by the table entries.
 //!
+//! This is the **platform adaptation layer**: it wires the
+//! `uds-core` crate to the rest of the firmware (RNG, OTA,
+//! hardware-specific callbacks). Every import here is either
+//! from `uds_core` (the protocol crate) or from `crate::ota`
+//! or `embassy_stm32` (platform).
+//!
 //! To add a new DID: add a callback fn here + a `DidReadEntry`
 //! row in `READ_DIDS`. To add a new routine: same pattern in
-//! `ROUTINES_START` / `_STOP` / `_RESULT`. To add a new SID:
-//! add a `ServiceEntry` row in `SERVICES` (and a
-//! `dispatch_0xNN` method in `table.rs`).
-//!
-//! The pending queue is `static mut` because `Option<PendingJob>`
-//! holds a closure (not `Sync`); the `unsafe` is required at
-//! the static initializer.
+//! `ROUTINES_START` / `_STOP` / `_RESULT`.
 
 use crate::ota;
-use crate::uds::crypto::AesBlock;
-use crate::uds::pending::UdsContext;
-use crate::uds::table::{DidReadEntry, DidWriteEntry, RoutineEntry,
-                          ServiceEntry, ServiceHandler, UdsConfig};
-use crate::uds::types::Nrc;
 use embassy_stm32::pac::RNG;
+use uds_core::crypto::AesBlock;
+use uds_core::pending::UdsContext;
+use uds_core::table::{
+    fallback_seed, DidReadEntry, DidWriteEntry, RoutineEntry,
+    ServiceEntry, ServiceHandler, UdsConfig,
+};
+use uds_core::types::Nrc;
 
 // Service table. Order is irrelevant (linear search); we group
 // related services for readability.
@@ -80,7 +82,7 @@ fn write_key_masks(data: &[u8]) -> Result<(), Nrc> {
     // is the sole owner of the UDS_CONFIG static.
     unsafe {
         let cfg = &mut *(&raw mut crate::uds::static_config::UDS_CONFIG
-                         as *mut crate::uds::table::UdsConfig);
+                         as *mut uds_core::table::UdsConfig);
         cfg.key_masks = masks;
     }
     defmt::info!("UDS: key_masks updated via DID 0xF180");
@@ -99,7 +101,7 @@ static WRITE_DIDS: &[DidWriteEntry] = &[
 // ---- Pending queue -------------------------------------------------------
 
 // 4 slots covers TransferData + TransferExit + 2 waiting.
-static mut PENDING_QUEUE: [Option<crate::uds::pending::PendingJob>; 4]
+static mut PENDING_QUEUE: [Option<uds_core::pending::PendingJob>; 4]
     = [None, None, None, None];
 
 // ---- Routine callbacks ---------------------------------------------------
@@ -148,8 +150,7 @@ static ROUTINES_RESULT: &[RoutineEntry] = &[
 /// The RNG peripheral clock (RNGEN in RCC AHB2ENR) must be enabled
 /// before calling this — typically done in `bsp::board_init()`.
 /// If the RNG is not clocked, the loop spins a short timeout and
-/// falls back to the timer jitter default (which is better than
-/// a dead ECU).
+/// falls back to the timer jitter default.
 fn rng_seed() -> AesBlock {
     // Enable RNG (idempotent after the first call).
     RNG.cr().modify(|w| w.set_rngen(true));
@@ -162,7 +163,7 @@ fn rng_seed() -> AesBlock {
                 // RNG not responding (clock disabled?) — return
                 // a deterministic seed so the ECU doesn't lock up.
                 defmt::warn!("RNG timeout — using fallback seed");
-                return super::table::fallback_seed();
+                return fallback_seed();
             }
             core::hint::spin_loop();
         }
@@ -205,6 +206,7 @@ pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     routines_result: ROUTINES_RESULT,
     pending_queue: unsafe { &mut *(&raw mut PENDING_QUEUE) },
     p2_server_ms: 50,
+    sa_max_attempts: 3,
     key_masks: [
         AesBlock::from_bytes([
             0x30, 0x00, 0x22, 0x12, 0xAB, 0xCD, 0xEF, 0x01,

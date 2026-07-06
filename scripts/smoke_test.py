@@ -298,6 +298,9 @@ class FirmwareEmulator:
         # DTC storage: list of (code, status) tuples.
         self.dtcs: list[tuple[int, int]] = []
 
+        # SecurityAccess fail count (matching Rust sa_fail_count).
+        self.sa_fail_count: int = 0
+
         # OTA state
         self.ota_state = 'Idle'
         self.ota_total = 0
@@ -583,6 +586,7 @@ class FirmwareEmulator:
         if sub == 0x01:
             self.uds_session = 0x01
             self.uds_security = 0  # session change invalidates security
+            self.sa_fail_count = 0
             self.last_response = bytes([SID_DSC + 0x40, 0x01])
         elif sub == 0x02:
             if self.uds_security == 0:
@@ -590,6 +594,7 @@ class FirmwareEmulator:
                 return
             self.uds_session = 0x02
             self.uds_security = 0
+            self.sa_fail_count = 0
             self.last_response = bytes([SID_DSC + 0x40, 0x02])
         elif sub == 0x03:
             if self.uds_security == 0:
@@ -597,6 +602,7 @@ class FirmwareEmulator:
                 return
             self.uds_session = 0x03
             self.uds_security = 0
+            self.sa_fail_count = 0
             self.last_response = bytes([SID_DSC + 0x40, 0x03])
         else:
             self.last_response = bytes([0x7F, SID_DSC, NRC_SUB_FUNC_NOT_SUPPORTED])
@@ -611,7 +617,15 @@ class FirmwareEmulator:
         if len(p) != 3:
             self.last_response = bytes([0x7F, SID_CDI, NRC_INCORRECT_MESSAGE_LENGTH])
             return
-        self.dtcs.clear()
+        group = (p[0] << 16) | (p[1] << 8) | p[2]
+        group_high_nibble = (p[0] & 0xF0)
+        if group == 0xFFFFFF:
+            # Clear all (matches Rust clear_group 0xFFFFFF).
+            self.dtcs.clear()
+        else:
+            # Clear by group high nibble (matches Rust clear_group logic).
+            self.dtcs = [(c, s) for c, s in self.dtcs
+                         if ((c >> 16) & 0xF0) != group_high_nibble]
         self.last_response = bytes([SID_CDI + 0x40])
 
     def _uds_rdtci(self, p: bytes) -> None:
@@ -673,6 +687,10 @@ class FirmwareEmulator:
             self.last_response = bytes([0x7F, SID_SA, NRC_INCORRECT_MESSAGE_LENGTH])
             return
         sub = p[0]
+        # ISO 14229-1 §7.22: lockout check (matches Rust dispatch_0x27).
+        if self.sa_fail_count >= 3:
+            self.last_response = bytes([0x7F, SID_SA, NRC_EXCEEDED_NUMBER_OF_ATTEMPTS])
+            return
         # Per-SAL session gate (matches Rust sal_session_allowed).
         if sub in (0x01, 0x02) and self.uds_session not in (0x01, 0x02):
             self.last_response = bytes(
@@ -699,9 +717,11 @@ class FirmwareEmulator:
                 return
             if p[1:17] == _aes_key(SEED_16, self.key_masks[0]):
                 self.uds_security = 1
+                self.sa_fail_count = 0
                 self.last_response = bytes([SID_SA + 0x40, 0x02])
             else:
-                self.last_response = bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED])
+                self.sa_fail_count += 1
+                self.last_response = bytes([0x7F, SID_SA, NRC_INVALID_KEY])
         elif sub == 0x03:
             if self.uds_security >= 2:
                 self.last_response = zero_seed(0x03)
@@ -713,9 +733,11 @@ class FirmwareEmulator:
                 return
             if p[1:17] == _aes_key(SEED_16, self.key_masks[1]):
                 self.uds_security = 2
+                self.sa_fail_count = 0
                 self.last_response = bytes([SID_SA + 0x40, 0x04])
             else:
-                self.last_response = bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED])
+                self.sa_fail_count += 1
+                self.last_response = bytes([0x7F, SID_SA, NRC_INVALID_KEY])
         elif sub == 0x05:
             if self.uds_security >= 3:
                 self.last_response = zero_seed(0x05)
@@ -727,9 +749,11 @@ class FirmwareEmulator:
                 return
             if p[1:17] == _aes_key(SEED_16, self.key_masks[2]):
                 self.uds_security = 3
+                self.sa_fail_count = 0
                 self.last_response = bytes([SID_SA + 0x40, 0x06])
             else:
-                self.last_response = bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED])
+                self.sa_fail_count += 1
+                self.last_response = bytes([0x7F, SID_SA, NRC_INVALID_KEY])
         else:
             self.last_response = bytes([0x7F, SID_SA, NRC_SUB_FUNC_NOT_SUPPORTED])
 
@@ -1451,6 +1475,43 @@ def s_uds_dtc_basic(bus: Bus) -> None:
                  "DTC report header (0 DTCs)")
 
 
+def s_uds_dtc_multi(bus: Bus) -> None:
+    """Multiple DTCs (P-group + U-group) + read by status mask + partial clear.
+    The high nibble of the first DTC byte encodes the group per ISO 15031-6:
+      0x0XXXXX = P (Powertrain)
+      0x3XXXXX = U (Network)
+    """
+    drv = MasterDriver(bus)
+    if isinstance(bus, SimBus):
+        # 0x030100: first byte 0x03 → high nibble 0x00 = P-group
+        bus.fw.dtcs.append((0x030100, 0x05))  # P-group, TEST_FAILED | CONFIRMED
+        # 0x130200: first byte 0x13 → high nibble 0x10 = C-group (Chassis)
+        bus.fw.dtcs.append((0x130200, 0x0D))  # C-group, different status bits
+    # Read by status mask 0x0F (TEST_FAILED | TEST_FAILED_CURRENT | CONFIRMED | PENDING).
+    resp = drv.send_uds(bytes([SID_RDTCI, 0x02, 0x0F]))
+    _assert(len(resp) == 13, f"ReadDTC multiresp len {len(resp)} (expected 13 = 5 header + 2×4)")
+    assert_bytes(resp[:5], bytes([SID_RDTCI + 0x40, 0x02, 0xFE, 0x00, 0x02]),
+                 "DTC report header (2 DTCs)")
+    # Read different mask → 0 matches (0x80 = NOT_AVAILABLE, not set).
+    resp = drv.send_uds(bytes([SID_RDTCI, 0x02, 0x80]))
+    assert_bytes(resp, bytes([SID_RDTCI + 0x40, 0x02, 0xFE, 0x00, 0x00]),
+                 "DTC report header (0 DTCs for mask 0x80)")
+    # Partial clear by C-group (0x10XXXX). The high nibble 0x10
+    # matches DTC 0x130200 but not 0x030100.
+    resp = drv.send_uds(bytes([SID_CDI, 0x10, 0xFF, 0xFF]))
+    assert_bytes(resp, bytes([SID_CDI + 0x40]), "Partial clear by C-group")
+    # Read all — only 0x030100 (P-group) should remain.
+    resp = drv.send_uds(bytes([SID_RDTCI, 0x02, 0xFF]))
+    _assert(len(resp) == 9, f"DTC after partial clear: len {len(resp)}")
+    assert_bytes(resp[:5], bytes([SID_RDTCI + 0x40, 0x02, 0xFE, 0x00, 0x01]),
+                 "DTC report header (1 DTC after C-group clear)")
+    # Full clear.
+    resp = drv.send_uds(bytes([SID_CDI, 0xFF, 0xFF, 0xFF]))
+    resp = drv.send_uds(bytes([SID_RDTCI, 0x02, 0xFF]))
+    assert_bytes(resp, bytes([SID_RDTCI + 0x40, 0x02, 0xFE, 0x00, 0x00]),
+                 "DTC report header (0 DTCs after full clear)")
+
+
 def s_uds_session_default(bus: Bus) -> None:
     """DiagnosticSessionControl 0x10 0x01 → 0x50 0x01."""
     drv = MasterDriver(bus)
@@ -1537,14 +1598,48 @@ def s_uds_active_did(bus: Bus) -> None:
 
 
 def s_uds_wrong_key(bus: Bus) -> None:
-    """SendKey with the wrong value → 0x33 SecurityAccessDenied."""
+    """SendKey with the wrong value → 0x35 InvalidKey."""
     drv = MasterDriver(bus)
     resp = drv.send_uds(bytes([SID_SA, 0x01]))
     # Extract seed, ignore it — we'll send a bogus key.
     bogus_key = b'\x00' * 16
     resp = drv.send_uds(bytes([SID_SA, 0x02]) + bogus_key)
-    assert_bytes(resp, bytes([0x7F, SID_SA, NRC_SECURITY_ACCESS_DENIED]),
+    assert_bytes(resp, bytes([0x7F, SID_SA, NRC_INVALID_KEY]),
                  "wrong key rejected")
+
+
+def s_uds_security_lockout(bus: Bus) -> None:
+    """3 consecutive wrong SendKey attempts → 0x36 ExceededNumberOfAttempts.
+    Session change resets the counter, allowing a fresh unlock."""
+    drv = MasterDriver(bus)
+    # 1. First wrong key.
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    seed = resp[2:]
+    resp = drv.send_uds(bytes([SID_SA, 0x02]) + b'\x00' * 16)
+    assert_bytes(resp, bytes([0x7F, SID_SA, NRC_INVALID_KEY]), "fail #1")
+    # 2. Second wrong key (fresh seed each time).
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    seed = resp[2:]
+    resp = drv.send_uds(bytes([SID_SA, 0x02]) + b'\x01' * 16)
+    assert_bytes(resp, bytes([0x7F, SID_SA, NRC_INVALID_KEY]), "fail #2")
+    # 3. Third wrong key.
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    seed = resp[2:]
+    resp = drv.send_uds(bytes([SID_SA, 0x02]) + b'\x02' * 16)
+    assert_bytes(resp, bytes([0x7F, SID_SA, NRC_INVALID_KEY]), "fail #3")
+    # 4. Fourth attempt → locked out (0x36).
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    assert_bytes(resp, bytes([0x7F, SID_SA, NRC_EXCEEDED_NUMBER_OF_ATTEMPTS]),
+                 "lockout after 3 failures")
+    # 5. Session change resets the counter.
+    resp = drv.send_uds(bytes([SID_DSC, 0x01]))
+    assert_bytes(resp, bytes([SID_DSC + 0x40, 0x01]), "session change resets lockout")
+    # 6. Fresh unlock works.
+    resp = drv.send_uds(bytes([SID_SA, 0x01]))
+    seed = resp[2:]
+    expected_key = _aes_key(seed, KEY_MASK_SAL1)
+    resp = drv.send_uds(bytes([SID_SA, 0x02]) + expected_key)
+    assert_bytes(resp, bytes([SID_SA + 0x40, 0x02]), "fresh unlock after session change")
 
 
 def s_uds_request_seed_when_unlocked(bus: Bus) -> None:
@@ -1737,6 +1832,8 @@ SCENARIOS: dict[str, callable] = {
     # limitation; full coverage needs a TP-only scenario that
     # bypasses SDO and uses a direct UDS dispatcher call.
     "uds_dtc":             s_uds_dtc_basic,
+    "uds_dtc_multi":       s_uds_dtc_multi,
+    "uds_security_lockout": s_uds_security_lockout,
     "uds_session":         s_uds_session_default,
     "uds_security":        s_uds_security_unlock,
     "uds_security_sal2":   s_uds_security_sal2,

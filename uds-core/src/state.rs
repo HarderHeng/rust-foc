@@ -7,16 +7,14 @@
 //! engine's mutable state and its I/O helpers.
 
 use core::cell::RefCell;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU8, Ordering};
 use critical_section::Mutex;
 
-use super::types::{Session, SecurityLevel, SrvState};
+use crate::types::{Session, SecurityLevel, SrvState};
 
 /// UDS engine runtime state. Single-threaded owner (canopen
 /// task). `request_buf` is set at the start of `dispatch`;
 /// pending-queue closures read it back via `UdsContext`.
-/// `response_pending = true` ⇒ `RESPONSE_BUF[0..response_len]`
-/// holds a response; the canopen task reads + clears.
 pub struct UdsState {
     pub session: Session,
     pub security: SecurityLevel,
@@ -28,12 +26,18 @@ pub struct UdsState {
     pub state: SrvState,
     pub request_buf: [u8; 64],
     pub request_len: usize,
+    /// Set by `store_response` or `tick` when a response is ready.
+    /// Polled by the transport layer.
     pub response_pending: bool,
     pub request_tick_ms: u32,
 
-    /// 0x28 CommControl: `true` ⇒ canopen task skips proactive
-    /// frames (heartbeat, NMT ACK, UDS responses).
+    /// 0x28 CommControl: `true` ⇒ transport skips proactive frames.
     pub tx_disabled: bool,
+
+    /// SecurityAccess (0x27) consecutive failed SendKey attempts.
+    /// Resets on successful unlock, session change, or power cycle.
+    /// When ≥ `config.sa_max_attempts`, returns 0x36 ExceededNumberOfAttempts.
+    pub sa_fail_count: u8,
 }
 
 impl UdsState {
@@ -49,42 +53,34 @@ impl UdsState {
             response_pending: false,
             request_tick_ms: 0,
             tx_disabled: false,
+            sa_fail_count: 0,
         }
     }
 }
 
 /// Shared response buffer. 64 bytes matches CAN-FD max payload
 /// (ISO 14229-3 §7 — UDS over CAN-FD single frame).
-pub type ResponseBuf = Mutex<RefCell<[u8; 64]>>;
+const RESPONSE_BUF_SIZE: usize = 64;
 
-pub static RESPONSE_BUF: ResponseBuf = Mutex::new(RefCell::new([0; 64]));
-pub static RESPONSE_LEN: core::sync::atomic::AtomicU8 =
-    core::sync::atomic::AtomicU8::new(0);
+static RESPONSE_BUF: Mutex<RefCell<[u8; RESPONSE_BUF_SIZE]>> =
+    Mutex::new(RefCell::new([0; RESPONSE_BUF_SIZE]));
+static RESPONSE_LEN: AtomicU8 = AtomicU8::new(0);
 
-/// Write a UDS response into the shared buffer. Also sets
-/// `UDS_STATE.response_pending = true` so the canopen task
-/// picks it up. Returns the byte count written (clipped to 64).
+/// Write a UDS response into the shared buffer. Returns the byte
+/// count written (clipped to 64).
 ///
 /// **Truncation**: the internal buffer is 64 bytes. Payloads
-/// >64 bytes will be silently truncated. None of the built-in
-/// SIDs exceed this — the longest response is an AES-128
-/// seed (18 bytes).
+/// >64 bytes will be silently truncated.
 pub fn store_response(payload: &[u8]) -> usize {
-    debug_assert!(payload.len() <= 64,
-                  "UDS response {} bytes exceeds 64-byte buffer",
-                  payload.len());
-    let len = payload.len().min(64);
+    debug_assert!(payload.len() <= RESPONSE_BUF_SIZE,
+                  "UDS response {} bytes exceeds {} byte buffer",
+                  payload.len(), RESPONSE_BUF_SIZE);
+    let len = payload.len().min(RESPONSE_BUF_SIZE);
     critical_section::with(|cs| {
         let buf = &mut *RESPONSE_BUF.borrow_ref_mut(cs);
         buf[..len].copy_from_slice(&payload[..len]);
     });
     RESPONSE_LEN.store(len as u8, Ordering::Relaxed);
-    // Safety: single-threaded executor.
-    unsafe {
-        let p = &raw const crate::uds::UDS_STATE
-               as *mut crate::uds::UdsState;
-        (*p).response_pending = true;
-    }
     len
 }
 
@@ -94,7 +90,8 @@ pub fn load_response() -> ([u8; 64], u8) {
     let len = RESPONSE_LEN.load(Ordering::Relaxed);
     critical_section::with(|cs| {
         let buf = RESPONSE_BUF.borrow_ref(cs);
-        for i in 0..(len as usize).min(64) {
+        let n = (len as usize).min(64);
+        for i in 0..n {
             bytes[i] = buf[i];
         }
     });

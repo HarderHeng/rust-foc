@@ -55,7 +55,7 @@ impl SecurityLevel {
 
 // ---- SrvState (engine state machine) ----
 
-#[derive(Copy, Clone, Debug, defmt::Format, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SrvState {
     /// Accept new requests.
     Idle,

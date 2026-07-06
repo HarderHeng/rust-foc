@@ -11,17 +11,15 @@
 //!
 //! ## Decoupling
 //!
-//! Fault detection lives OUTSIDE the UDS module (e.g. in
-//! `drivers/can/canopen.rs` for CAN timeout). It imports
-//! `crate::uds::dtc::set_dtc` — a simple function call, no
-//! callback registration needed. The UDS module doesn't know
-//! who calls it or when.
+//! Fault detection lives OUTSIDE this crate (e.g. in a CANopen
+//! task). It imports `uds_core::dtc::set_dtc` — a simple function
+//! call, no callback registration needed.
 
 use core::cell::RefCell;
 use critical_section::Mutex;
 
-use super::state::store_response;
-use super::types::Nrc;
+use crate::state::store_response;
+use crate::types::Nrc;
 
 // ---- Constants ------------------------------------------------------------
 
@@ -94,7 +92,7 @@ pub fn set_dtc(code: DtcCode, bits: u8) {
     });
 }
 
-/// Clear a specific DTC (sets its status to 0 — no longer present).
+/// Clear a specific DTC (removes it from storage).
 pub fn clear_dtc(code: DtcCode) {
     critical_section::with(|cs| {
         let mut storage = DTCS.borrow_ref_mut(cs);
@@ -125,7 +123,6 @@ pub fn clear_group(group: u32) {
             return;
         }
         // Clear matching group (by high nibble of most-significant byte).
-        // In practice most callers use 0xFFFFFF.
         let group_high_nibble = (group >> 16) as u8 & 0xF0;
         for slot in storage.iter_mut() {
             if let Some(rec) = slot {

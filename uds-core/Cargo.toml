@@ -1,0 +1,17 @@
+[package]
+name = "uds-core"
+version = "0.1.0"
+edition = "2021"
+description = "ISO 14229 UDS (Unified Diagnostic Services) protocol engine — no-std, no platform deps"
+
+[features]
+default = ["defmt"]
+defmt = ["dep:defmt"]
+
+[dependencies]
+aes = "0.8"
+critical-section = "1.1"
+defmt = { version = "1", optional = true }
+
+[dev-dependencies]
+critical-section = { version = "1.1", features = ["std"] }

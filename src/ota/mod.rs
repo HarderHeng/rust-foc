@@ -432,14 +432,14 @@ enum NRC {
 #[inline(never)]
 #[link_section = ".data"]
 fn store_uds_positive(payload: &[u8]) -> usize {
-    crate::uds::state::store_response(payload)
+    uds_core::state::store_response(payload)
 }
 
 /// Same but for negative responses (`[0x7F, SID, NRC]`).
 #[inline(never)]
 #[link_section = ".data"]
 fn store_uds_negative(sid: u8, nrc: NRC) -> usize {
-    crate::uds::state::store_response(&[0x7F, sid, nrc as u8])
+    uds_core::state::store_response(&[0x7F, sid, nrc as u8])
 }
 
 /// Standard CRC-32/ISO-HDLC (poly 0x04C1_1DB7), one byte at

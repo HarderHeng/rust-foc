@@ -27,7 +27,7 @@ use embassy_stm32::can::frame::FdFrame;
 use embedded_can::Id;
 
 use crate::uds;
-use crate::uds::state::load_response;
+use uds_core::state::load_response;
 
 // ============================================================================
 // CAN-ID routing

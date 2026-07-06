@@ -5,31 +5,25 @@
 //!
 //! The MiniUds pattern: ALL `dispatch_0xNN` methods live on
 //! `UdsConfig`. Adding a new SID = add a method here + a
-//! `ServiceEntry` in `static_config.rs`. Adding a new
-//! callback (DID reader, routine handler) = add an entry in
-//! `static_config.rs`. Nothing else moves.
-//!
-//! Each `dispatch_0xNN` is short: parse the wire format, find
-//! the table entry, gate on session+security, call the
-//! callback. State mutations are explicit (e.g. 0x10 advances
-//! `state.session`, 0x27 advances `state.security`, 0x28 sets
-//! `state.tx_disabled`).
+//! `ServiceEntry` in the platform's `static_config.rs`. Adding a
+//! new callback (DID reader, routine handler) = add an entry in
+//! the platform's tables. Nothing else moves.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use defmt::info;
 
-use super::crypto::{generate_key, AesBlock};
-use super::pending::{push_pending, PendingFn, UdsContext};
-use super::state::{store_response, UdsState};
-use super::types::{Nrc, SecurityLevel, Session};
+use crate::crypto::{generate_key, AesBlock};
+use crate::pending::{push_pending, PendingFn, UdsContext};
+use crate::state::{store_response, UdsState};
+use crate::types::{Nrc, SecurityLevel, Session};
+use crate::uds_log;
 
 // ============================================================================
 // Schema types — the *shape* of the tables
 // ============================================================================
 
-/// Tag for the built-in SID dispatchers. Used by `mod.rs` to
-/// route a request to the right `dispatch_0xNN` method. There
-/// is one variant per built-in SID.
+/// Tag for the built-in SID dispatchers. Used by the platform's
+/// `dispatch` function to route a request to the right
+/// `dispatch_0xNN` method. There is one variant per built-in SID.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ServiceHandler {
     Session,        // 0x10
@@ -52,10 +46,9 @@ pub enum ServiceHandler {
     TesterPresent,  // 0x3E
 }
 
-/// One row in the service table. The dispatcher in
-/// `super::mod` looks up SID, gates on session+security, and
-/// then calls the matching `ServiceHandler::dispatch_*` method
-/// (which lives in this file as `UdsConfig::dispatch_0xNN`).
+/// One row in the service table. The platform's dispatcher looks
+/// up SID, gates on session+security, and then calls the matching
+/// `ServiceHandler::dispatch_*` method.
 #[derive(Copy, Clone, Debug)]
 pub struct ServiceEntry {
     pub sid: u8,
@@ -104,13 +97,13 @@ pub struct RoutineEntry {
 /// Helper: build the bitmask for a given session.
 pub const fn session_bit(s: Session) -> u8 { 1 << (s.as_u8() - 1) }
 
-/// Check whether `state.session` is in the `access` bitmask.
+/// Check whether `state_session` is in the `access` bitmask.
 pub fn session_allowed(state_session: Session, access: u8) -> bool {
     if access == 0 { return true; }
     (access & session_bit(state_session)) != 0
 }
 
-/// Check whether `state.security >= required`.
+/// Check whether `state_security >= required`.
 pub fn security_allowed(state_security: SecurityLevel, required: u8) -> bool {
     (state_security as u8) >= required
 }
@@ -132,23 +125,26 @@ pub struct UdsConfig {
     pub routines_stop: &'static [RoutineEntry],
     pub routines_result: &'static [RoutineEntry],
 
-    /// Pending queue (Phase 5c). 4 slots covers TransferData +
-    /// TransferExit + 2 waiting. `&'static mut` because
-    /// `dispatch` and `tick` need to mutate the slots and
-    /// `Option<PendingJob>` contains a closure which isn't Sync.
-    pub pending_queue: &'static mut [Option<super::pending::PendingJob>],
+    /// Pending queue slots.
+    pub pending_queue: &'static mut [Option<crate::pending::PendingJob>],
 
     /// P2 server timer (ms). When a request stays in
     /// `SrvState::Pending` for longer than this, the dispatcher
     /// pushes a 0x78 response. ISO 14229 standard: 50 ms.
     pub p2_server_ms: u32,
 
+    /// Maximum consecutive SecurityAccess (0x27) SendKey failures
+    /// before the ECU returns 0x36 ExceededNumberOfAttempts (ISO
+    /// 14229-1 §7.22). The counter resets on successful unlock,
+    /// session change, or power cycle.
+    pub sa_max_attempts: u8,
+
     /// Per-SAL AES-128 key material. Index 0/1/2 = SAL1/2/3.
-    /// Writably at runtime via DID 0xF180.
+    /// Writable at runtime via DID 0xF180.
     pub key_masks: [AesBlock; 3],
 
     /// Session-change callbacks. The runtime registers these
-    /// in `static_config.rs`; `fn` pointer (no capture) is fine
+    /// in the platform's config; `fn` pointer (no capture) is fine
     /// for no-alloc no_std.
     pub on_default_session_enter: Option<fn()>,
     pub on_programming_session_enter: Option<fn()>,
@@ -156,55 +152,32 @@ pub struct UdsConfig {
 
     /// Seed-generation callback for SecurityAccess (0x27).
     ///
-    /// `None` — use the built-in SysTick jitter (good enough
-    /// for most industrial UDS deployments).
-    ///
+    /// `None` — use the built-in counter-based seed.
     /// `Some(fn)` — call `f()` every RequestSeed. The function
-    /// must return 16 cryptographically random bytes. Example
-    /// using a platform register (e.g., hardware RNG, SysTick
-    /// jitter, or TRNG):
-    ///
-    /// ```ignore
-    /// fn my_seed() -> AesBlock {
-    ///     let mut seed = [0u8; 16];
-    ///     // Fill `seed` from platform entropy source ...
-    ///     AesBlock(seed)
-    /// }
-    /// ```
+    /// must return 16 cryptographically random bytes.
     pub seed_fn: Option<fn() -> AesBlock>,
 
     /// Key-derivation callback for SecurityAccess (0x27).
     ///
     /// `None` — use the built-in AES-128-ECB.
-    ///
     /// `Some(fn)` — called every SendKey with `(seed, key_material)`,
-    /// must return the derived 16-byte key. Enables custom algorithms
-    /// (proprietary cipher, custom LFSR, XOR, etc.) without touching
-    /// the UDS core.
+    /// must return the derived 16-byte key.
     pub key_fn: Option<fn(&AesBlock, &AesBlock) -> AesBlock>,
 
     /// OTA callbacks for 0x34/0x36/0x37 (pending queue).
     ///
-    /// `None` — the corresponding SID returns 0x22 (not accepted).
-    ///
-    /// `Some(fn)` — called from the pending queue closure. The
-    /// function reads request bytes from `ctx.state.request_buf`,
-    /// performs the flash operation, and sets `ctx.complete = true`
-    /// when done.
-    ///
-    /// Separate from `on_*_session_enter` / `seed_fn` / `key_fn`
-    /// because OTA is an optional feature — not every UDS user
-    /// has an OTA module or uses flash-based download.
+    /// `None` — the corresponding SID returns 0x22/0x13.
+    /// `Some(fn)` — called from the pending queue closure.
     pub request_download_fn: Option<fn(&mut UdsContext)>,
     pub transfer_data_fn: Option<fn(&mut UdsContext)>,
     pub transfer_exit_fn: Option<fn(&mut UdsContext)>,
 }
 
 // ============================================================================
-// Reset request flag (consumed by canopen_task)
+// Reset request flag (consumed by the platform's transport task)
 // ============================================================================
 
-/// Reset requested by 0x11. Polled by the canopen task after
+/// Reset requested by 0x11. Polled by the transport task after
 /// the response has gone out.
 pub static RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Subfunc of the last armed reset (1 = Hard, 3 = Soft).
@@ -253,6 +226,7 @@ impl UdsConfig {
         // ISO 14229: session change invalidates security.
         state.security = SecurityLevel::Locked;
         state.seed_sent = false;
+        state.sa_fail_count = 0;
 
         // Fire session-enter callback.
         let cb = match new_session {
@@ -262,7 +236,7 @@ impl UdsConfig {
         };
         if let Some(cb) = cb { cb(); }
 
-        info!("UDS: session → 0x{:02x}", subfunc);
+        uds_log!("UDS: session → 0x{:02x}", subfunc);
         store_response(&[0x50, subfunc]);
     }
 
@@ -280,7 +254,7 @@ impl UdsConfig {
             0x01 | 0x03 => {
                 RESET_REQUESTED.store(true, Ordering::Relaxed);
                 RESET_SUBFUNC.store(subfunc, Ordering::Relaxed);
-                info!("UDS: ECUReset({}) requested",
+                uds_log!("UDS: ECUReset({}) requested",
                       if subfunc == 0x01 { "Hard" } else { "Soft" });
                 store_response(&[0x51, subfunc]);
             }
@@ -293,13 +267,13 @@ impl UdsConfig {
     // -- 0x14 ClearDiagnosticInformation ------------------------------
 
     pub fn dispatch_0x14(&self, _state: &mut UdsState, req: &[u8]) {
-        super::dtc::handle_clear(req);
+        crate::dtc::handle_clear(req);
     }
 
     // -- 0x19 ReadDTCInformation -------------------------------------
 
     pub fn dispatch_0x19(&self, _state: &mut UdsState, req: &[u8]) {
-        super::dtc::handle_read(req);
+        crate::dtc::handle_read(req);
     }
 
     // -- 0x22 ReadDataByIdentifier -----------------------------------
@@ -378,6 +352,11 @@ impl UdsConfig {
     // -- 0x27 SecurityAccess -----------------------------------------
 
     pub fn dispatch_0x27(&self, state: &mut UdsState, req: &[u8]) {
+        // ISO 14229-1 §7.22: lockout check.
+        if self.sa_max_attempts > 0 && state.sa_fail_count >= self.sa_max_attempts {
+            store_response(&Nrc::ExceededNumberOfAttempts.negative_response(0x27));
+            return;
+        }
         if req.len() < 2 {
             store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
                 .negative_response(0x27));
@@ -416,25 +395,21 @@ impl UdsConfig {
         match subfunc {
             0x00 => {
                 state.tx_disabled = false;
-                info!("UDS: CommControl enable (TX ON)");
+                uds_log!("UDS: CommControl enable (TX ON)");
                 store_response(&[0x68, 0x00]);
             }
             0x01 => {
                 state.tx_disabled = true;
-                info!("UDS: CommControl enableRxDisableTx (TX OFF)");
+                uds_log!("UDS: CommControl enableRxDisableTx (TX OFF)");
                 store_response(&[0x68, 0x01]);
             }
             0x02 => {
-                // enableTxDisableRx: advisory only. Dispatcher
-                // always accepts incoming SDO/UDS frames; future
-                // phase may wire `state.rx_disabled` into
-                // canopen_task.
-                info!("UDS: CommControl enableTxDisableRx (advisory)");
+                uds_log!("UDS: CommControl enableTxDisableRx (advisory)");
                 store_response(&[0x68, 0x02]);
             }
             0x03 => {
                 state.tx_disabled = true;
-                info!("UDS: CommControl disable (TX OFF)");
+                uds_log!("UDS: CommControl disable (TX OFF)");
                 store_response(&[0x68, 0x03]);
             }
             _ => {
@@ -489,7 +464,7 @@ impl UdsConfig {
                 out[2] = req[2];
                 out[3] = req[3];
                 out[4..4 + n].copy_from_slice(&resp_buf[..n]);
-                info!("UDS: Routine 0x{:04x} sub=0x{:02x} OK ({} bytes result)",
+                uds_log!("UDS: Routine 0x{:04x} sub=0x{:02x} OK ({} bytes result)",
                       rid, subfunc, resp_len);
                 store_response(&out[..total]);
             }
@@ -501,7 +476,6 @@ impl UdsConfig {
 
     /// 0x34 RequestDownload (OTA). Pushes the registered
     /// `request_download_fn` onto the pending queue.
-    /// Returns `false` if validation fails or no callback set.
     pub fn dispatch_0x34(&mut self, state: &mut UdsState) -> bool {
         let req = &state.request_buf[..state.request_len];
         if req.len() != 6 || req[1] != 0x00 {
@@ -591,13 +565,9 @@ pub enum RoutineSub {
 ///
 /// Uses the configured `seed_fn` callback if set (`UdsConfig::seed_fn`);
 /// otherwise falls back to a deterministic-but-changing seed from a
-/// static counter. The counter ensures every RequestSeed in the same
-/// session returns different bytes; it does NOT provide cryptographic
-/// randomness. **Production deployments must configure `seed_fn`** to
-/// point at a true entropy source (hardware RNG or system jitter).
-/// Platform-independent counter-based seed. Used as fallback when
-/// no `seed_fn` or RNG is available. Every call returns different
-/// bytes but the sequence is deterministic — fine for smoke tests.
+/// static counter. Every call returns different bytes but the sequence
+/// is deterministic — fine for smoke tests. **Production deployments
+/// must configure `seed_fn`** to point at a true entropy source.
 pub fn fallback_seed() -> AesBlock {
     static COUNTER: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(0);
@@ -657,7 +627,7 @@ fn sa_request_seed(state: &mut UdsState, config: &UdsConfig, sal: u8, subfunc: u
     resp[0] = subfunc + 0x40;
     resp[1] = subfunc;
     resp[2..18].copy_from_slice(&seed.0);
-    info!("UDS: SecurityAccess RequestSeed(SAL{}) → {:02x}..{:02x}",
+    uds_log!("UDS: SecurityAccess RequestSeed(SAL{}) → {:02x}..{:02x}",
           sal, seed.0[0], seed.0[1]);
     store_response(&resp);
 }
@@ -682,15 +652,18 @@ fn sa_send_key(state: &mut UdsState, config: &UdsConfig, sal: u8,
         generate_key(&AesBlock(state.current_seed), &config.key_masks[(sal - 1) as usize])
     };
     if rx_key != expected.0 {
-        info!("UDS: SecurityAccess SAL{} wrong key", sal);
+        state.sa_fail_count = state.sa_fail_count.saturating_add(1);
+        uds_log!("UDS: SecurityAccess SAL{} wrong key (fail #{})",
+              sal, state.sa_fail_count);
         store_response(&Nrc::InvalidKey.negative_response(0x27));
         return;
     }
     state.security = SecurityLevel::from_u8(sal);
-    info!("UDS: SecurityAccess unlocked to SAL{}", sal);
+    state.sa_fail_count = 0;
+    uds_log!("UDS: SecurityAccess unlocked to SAL{}", sal);
     store_response(&[subfunc + 0x40, subfunc]);
 }
 
-// OTA pending closures live in `static_config.rs`, registered via
+// OTA pending closures live in the platform's config, registered via
 // `UdsConfig::request_download_fn / transfer_data_fn / transfer_exit_fn`.
-// When `None`, the SID returns 0x22 — zero OTA coupling.
+// When `None`, the SID returns an NRC — zero OTA coupling.

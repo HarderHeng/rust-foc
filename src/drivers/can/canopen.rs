@@ -51,7 +51,7 @@ use embassy_time::{Duration, Ticker};
 
 use crate::ota;
 use crate::uds;
-use crate::uds::dtc;
+use uds_core::dtc;
 use embassy_time::Instant;
 use crate::drivers::can::uds_bridge as uds_transport;
 
