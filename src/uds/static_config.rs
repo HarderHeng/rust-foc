@@ -17,6 +17,7 @@ use crate::uds::pending::UdsContext;
 use crate::uds::table::{DidReadEntry, DidWriteEntry, RoutineEntry,
                           ServiceEntry, ServiceHandler, UdsConfig};
 use crate::uds::types::Nrc;
+use embassy_stm32::pac::RNG;
 
 // Service table. Order is irrelevant (linear search); we group
 // related services for readability.
@@ -140,6 +141,37 @@ static ROUTINES_RESULT: &[RoutineEntry] = &[
     },
 ];
 
+// ---- RNG seed for SecurityAccess -----------------------------------------
+
+/// Read 16 random bytes from the STM32G4 hardware RNG.
+///
+/// The RNG peripheral clock (RNGEN in RCC AHB2ENR) must be enabled
+/// before calling this — typically done in `bsp::board_init()`.
+/// If the RNG is not clocked, the loop spins a short timeout and
+/// falls back to the timer jitter default (which is better than
+/// a dead ECU).
+fn rng_seed() -> AesBlock {
+    // Enable RNG (idempotent after the first call).
+    RNG.cr().modify(|w| w.set_rngen(true));
+    let mut seed = [0u8; 16];
+    for chunk in seed.chunks_mut(4) {
+        let mut timeout = 10_000u32;
+        while !RNG.sr().read().drdy() {
+            timeout -= 1;
+            if timeout == 0 {
+                // RNG not responding (clock disabled?) — return
+                // a deterministic seed so the ECU doesn't lock up.
+                defmt::warn!("RNG timeout — using fallback seed");
+                return super::table::fallback_seed();
+            }
+            core::hint::spin_loop();
+        }
+        let val = RNG.dr().read();
+        chunk.copy_from_slice(&val.to_le_bytes());
+    }
+    AesBlock(seed)
+}
+
 // ---- OTA callbacks (registered into UDS_CONFIG below) -------------------
 
 fn ota_request_download(ctx: &mut UdsContext) {
@@ -190,7 +222,7 @@ pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     on_default_session_enter: None,
     on_programming_session_enter: None,
     on_extended_session_enter: None,
-    seed_fn: None,
+    seed_fn: Some(rng_seed),
     key_fn: None,
     request_download_fn: Some(ota_request_download),
     transfer_data_fn: Some(ota_transfer_data),

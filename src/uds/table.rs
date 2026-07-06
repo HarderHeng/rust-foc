@@ -613,14 +613,10 @@ pub enum RoutineSub {
 /// session returns different bytes; it does NOT provide cryptographic
 /// randomness. **Production deployments must configure `seed_fn`** to
 /// point at a true entropy source (hardware RNG or system jitter).
-fn generate_seed(config: &UdsConfig) -> AesBlock {
-    if let Some(f) = config.seed_fn {
-        return f();
-    }
-    // Platform-independent fallback: counter XOR spread across 16 bytes.
-    // Every call returns different bytes, but the sequence is deterministic.
-    // This is fine for development / smoke tests; replace with RNG for
-    // production (see `UdsConfig::seed_fn`).
+/// Platform-independent counter-based seed. Used as fallback when
+/// no `seed_fn` or RNG is available. Every call returns different
+/// bytes but the sequence is deterministic — fine for smoke tests.
+pub fn fallback_seed() -> AesBlock {
     static COUNTER: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(0);
     let c = COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -630,6 +626,13 @@ fn generate_seed(config: &UdsConfig) -> AesBlock {
         seed[i * 4..(i + 1) * 4].copy_from_slice(&v.to_le_bytes());
     }
     AesBlock(seed)
+}
+
+fn generate_seed(config: &UdsConfig) -> AesBlock {
+    if let Some(f) = config.seed_fn {
+        return f();
+    }
+    fallback_seed()
 }
 
 /// 0x27 subfunc → (SAL number, RequestSeed?).
