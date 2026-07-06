@@ -43,6 +43,7 @@ const MAX_DTCS: usize = 8;
 pub type DtcCode = u32;
 
 /// Status bitmask per ISO 14229-1 Table 55.
+#[allow(dead_code)]
 pub mod status {
     pub const TEST_FAILED: u8                 = 0x01;
     pub const TEST_FAILED_CURRENT: u8          = 0x02;
