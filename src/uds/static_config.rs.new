@@ -1,1 +1,0 @@
-fn _rng_check() { let _ = embassy_stm32::pac::RNG; }
