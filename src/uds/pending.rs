@@ -29,7 +29,7 @@
 //! bytes" slot per PendingJob. For now the queue is
 //! infrastructure-only; no continuations are pushed.
 
-use super::state::{load_response, store_response, UdsState};
+use super::state::{store_response, UdsState};
 use super::table::UdsConfig;
 use super::types::Nrc;
 
@@ -41,6 +41,7 @@ pub const PENDING_QUEUE_SIZE: usize = 4;
 /// `complete = true` when it's done writing the response.
 pub struct UdsContext<'a> {
     pub state: &'a mut UdsState,
+    #[allow(dead_code)]
     pub config: &'a UdsConfig,
     pub complete: bool,
 }
@@ -161,33 +162,3 @@ fn send_response_pending(state: &mut UdsState) {
     store_response(&bytes);
 }
 
-/// Caller (canopen_task) checks if a response is ready and
-/// consumes the flag. The actual bytes are read separately via
-/// `load_response()` (which returns `(bytes, len)`).
-///
-/// **Why this split**: `RESPONSE_BUF` is a static, and the
-/// borrow checker can't tie a `&'a [u8]` returned by
-/// `take_response` to the lifetime of a `&UdsState` mut
-/// borrow. The canopen_task needs both — but it's already
-/// calling `load_response` for the wire bytes, so we just
-/// need `take_response` to clear the flag.
-///
-/// **Caller protocol** (matches design doc §4.13):
-/// 1. `dispatch()` or `tick()` sets `response_pending = true`
-///    and writes bytes to `RESPONSE_BUF`.
-/// 2. Caller (canopen_task) calls `take_response()`. If
-///    `Some(len)`, read `RESPONSE_BUF` via `load_response()`
-///    and send the SDO read response.
-/// 3. If `None`, no response yet — caller should wait for
-///    the next tick to push one.
-pub fn take_response(state: &mut UdsState) -> Option<u8> {
-    if !state.response_pending {
-        return None;
-    }
-    state.response_pending = false;
-    let (_bytes, len) = load_response();
-    if len == 0 {
-        return None;
-    }
-    Some(len)
-}

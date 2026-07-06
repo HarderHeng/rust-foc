@@ -61,6 +61,7 @@ pub fn heartbeat_period_ms() -> u16 {
 /// Set the heartbeat period. Public for external callers
 /// (currently none in the Phase 6+ code base; kept for the
 /// legacy 0x1017 OD path if it's restored).
+#[allow(dead_code)]
 pub fn set_heartbeat_period_ms(ms: u16) {
     HEARTBEAT_PRODUCER_MS.store(ms, Ordering::Relaxed);
 }

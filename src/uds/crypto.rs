@@ -22,6 +22,7 @@ pub const AES_BLOCK_SIZE: usize = 16;
 #[derive(Clone, Copy, Format, PartialEq, Eq)]
 pub struct AesBlock(pub [u8; AES_BLOCK_SIZE]);
 
+#[allow(dead_code)]
 impl AesBlock {
     pub const fn from_bytes(b: [u8; AES_BLOCK_SIZE]) -> Self { Self(b) }
 

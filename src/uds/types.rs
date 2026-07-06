@@ -49,6 +49,7 @@ impl SecurityLevel {
             _ => Self::Sal3,
         }
     }
+    #[allow(dead_code)]
     pub const fn as_u8(self) -> u8 { self as u8 }
 }
 
@@ -64,6 +65,7 @@ pub enum SrvState {
 
 // ---- Nrc (ISO 14229-1 Annex B.2) ----
 
+#[allow(dead_code)]
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Nrc {

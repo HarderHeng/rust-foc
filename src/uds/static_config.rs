@@ -171,7 +171,7 @@ pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     routines_start: ROUTINES_START,
     routines_stop: ROUTINES_STOP,
     routines_result: ROUTINES_RESULT,
-    pending_queue: unsafe { &mut PENDING_QUEUE },
+    pending_queue: unsafe { &mut *(&raw mut PENDING_QUEUE) },
     p2_server_ms: 50,
     key_masks: [
         AesBlock::from_bytes([

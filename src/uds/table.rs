@@ -40,8 +40,11 @@ pub enum ServiceHandler {
     WriteDataById,  // 0x2E
     CommControl,    // 0x28
     SecurityAccess, // 0x27
+    #[allow(dead_code)]
     RoutineStart,   // 0x31 (start)
+    #[allow(dead_code)]
     RoutineStop,    // 0x31 (stop)
+    #[allow(dead_code)]
     RoutineResult,  // 0x31 (result)
     RequestDownload,// 0x34
     TransferData,   // 0x36

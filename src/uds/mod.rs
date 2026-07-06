@@ -63,12 +63,6 @@ pub fn tick(now_ms: u32) {
     pending::tick(state, config, now_ms);
 }
 
-/// True iff a UDS response is ready in the shared buffer.
-pub fn response_ready() -> bool {
-    // Safety: single-threaded.
-    unsafe { (*(&raw const UDS_STATE)).response_pending }
-}
-
 /// Dispatch a UDS request. `request[0]` is the SID. The
 /// response is stored in the shared buffer; the caller reads
 /// it via `state::load_response()` after the dispatch returns.

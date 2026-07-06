@@ -154,6 +154,7 @@ pub unsafe fn write_u64(offset: u32, value: u64) -> Result<(), FlashError> {
 
 /// Read 4 bytes from flash. Used by the OTA CRC32 verification
 /// pass.
+#[allow(dead_code)]
 pub fn read_u32(offset: u32) -> u32 {
     unsafe { core::ptr::read_volatile(offset as *const u32) }
 }
