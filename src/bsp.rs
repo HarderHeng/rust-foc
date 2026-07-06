@@ -187,6 +187,9 @@ pub fn board_init(p: Peripherals) -> BoardHandles {
     pwm.enable(embassy_stm32::timer::Channel::Ch3);
     pwm.set_master_output_enable(false);
 
+    // Enable RNG peripheral clock (AHB2).
+    embassy_stm32::pac::RCC.ahb2enr().modify(|w| w.set_rngen(true));
+
     BoardHandles {
         debug_uart: Uart2Sink::new(buffered),
         motor_pwm: MotorPwm::new(pwm),
