@@ -329,10 +329,7 @@ pub async fn canopen_task(can: &'static mut Can<'static>, transport: &'static dy
                                 _ => "OTA",
                             };
                             info!("UDS/OTA: NVIC {} reset in 10 ms", kind);
-                            // 10 ms at 170 MHz; lets the last
-                            // TX byte (and any pending CAN
-                            // frame) reach the wire.
-                            cortex_m::asm::delay(170_000_000 / 100);
+                            embassy_time::Timer::after(Duration::from_millis(10)).await;
                             SCB::sys_reset();
                         }
                     }

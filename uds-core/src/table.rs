@@ -217,7 +217,9 @@ impl UdsConfig {
                 .negative_response(0x10));
             return;
         }
-        let subfunc = req[1];
+        let subfunc_raw = req[1];
+        let suppress = subfunc_raw & 0x80 != 0;
+        let subfunc = subfunc_raw & 0x7F;
         let new_session = match Session::from_u8(subfunc) {
             Some(s) => s,
             None => {
@@ -247,7 +249,11 @@ impl UdsConfig {
         if let Some(cb) = cb { cb(); }
 
         uds_log!("UDS: session → 0x{:02x}", subfunc);
-        store_response(&[0x50, subfunc]);
+        if suppress {
+            store_response(&[]);
+        } else {
+            store_response(&[0x50, subfunc]);
+        }
     }
 
     // -- 0x11 ECUReset -----------------------------------------------
@@ -259,7 +265,9 @@ impl UdsConfig {
                 .negative_response(0x11));
             return;
         }
-        let subfunc = req[1];
+        let subfunc_raw = req[1];
+        let suppress = subfunc_raw & 0x80 != 0;
+        let subfunc = subfunc_raw & 0x7F;
         match subfunc {
             0x01 | 0x03 => {
                 state.sa_fail_count = 0;
@@ -267,7 +275,11 @@ impl UdsConfig {
                 RESET_SUBFUNC.store(subfunc, Ordering::Relaxed);
                 uds_log!("UDS: ECUReset({}) requested",
                       if subfunc == 0x01 { "Hard" } else { "Soft" });
-                store_response(&[0x51, subfunc]);
+                if suppress {
+                    store_response(&[]);
+                } else {
+                    store_response(&[0x51, subfunc]);
+                }
             }
             _ => {
                 store_response(&Nrc::SubFunctionNotSupported.negative_response(0x11));
@@ -290,13 +302,13 @@ impl UdsConfig {
     // -- 0x22 ReadDataByIdentifier -----------------------------------
 
     pub fn dispatch_0x22(&self, state: &mut UdsState, req: &[u8]) {
-        // [0x22, did_lo, did_hi] → [0x62, did_lo, did_hi, ...data]
+        // [0x22, did_hi, did_lo] → [0x62, did_hi, did_lo, ...data]
         if req.len() != 3 {
             store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
                 .negative_response(0x22));
             return;
         }
-        let did = u16::from_le_bytes([req[1], req[2]]);
+        let did = u16::from_be_bytes([req[1], req[2]]);
         let entry = match self.read_dids.iter().find(|e| e.did == did) {
             Some(e) => e,
             None => {
@@ -331,13 +343,13 @@ impl UdsConfig {
     // -- 0x2E WriteDataByIdentifier ----------------------------------
 
     pub fn dispatch_0x2e(&self, state: &mut UdsState, req: &[u8]) {
-        // [0x2E, did_lo, did_hi, data...] → [0x6E, did_lo, did_hi] or NRC.
+        // [0x2E, did_hi, did_lo, data...] → [0x6E, did_hi, did_lo] or NRC.
         if req.len() < 3 {
             store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
                 .negative_response(0x2E));
             return;
         }
-        let did = u16::from_le_bytes([req[1], req[2]]);
+        let did = u16::from_be_bytes([req[1], req[2]]);
         let entry = match self.write_dids.iter().find(|e| e.did == did) {
             Some(e) => e,
             None => {
@@ -401,27 +413,29 @@ impl UdsConfig {
                 .negative_response(0x28));
             return;
         }
-        let subfunc = req[1];
+        let subfunc_raw = req[1];
+        let suppress = subfunc_raw & 0x80 != 0;
+        let subfunc = subfunc_raw & 0x7F;
         let _network_type = req[2];
         match subfunc {
             0x00 => {
                 state.tx_disabled = false;
                 uds_log!("UDS: CommControl enable (TX ON)");
-                store_response(&[0x68, 0x00]);
+                if suppress { store_response(&[]); } else { store_response(&[0x68, 0x00]); }
             }
             0x01 => {
                 state.tx_disabled = true;
                 uds_log!("UDS: CommControl enableRxDisableTx (TX OFF)");
-                store_response(&[0x68, 0x01]);
+                if suppress { store_response(&[]); } else { store_response(&[0x68, 0x01]); }
             }
             0x02 => {
                 uds_log!("UDS: CommControl enableTxDisableRx (advisory)");
-                store_response(&[0x68, 0x02]);
+                if suppress { store_response(&[]); } else { store_response(&[0x68, 0x02]); }
             }
             0x03 => {
                 state.tx_disabled = true;
                 uds_log!("UDS: CommControl disable (TX OFF)");
-                store_response(&[0x68, 0x03]);
+                if suppress { store_response(&[]); } else { store_response(&[0x68, 0x03]); }
             }
             _ => {
                 store_response(&Nrc::SubFunctionNotSupported.negative_response(0x28));
@@ -440,7 +454,9 @@ impl UdsConfig {
                 .negative_response(0x31));
             return;
         }
-        let subfunc = req[1];
+        let subfunc_raw = req[1];
+        let suppress = subfunc_raw & 0x80 != 0;
+        let subfunc = subfunc_raw & 0x7F;
         let rid = u16::from_be_bytes([req[2], req[3]]);
         let table: &[RoutineEntry] = match sub {
             RoutineSub::Start => self.routines_start,
@@ -477,7 +493,11 @@ impl UdsConfig {
                 out[4..4 + n].copy_from_slice(&resp_buf[..n]);
                 uds_log!("UDS: Routine 0x{:04x} sub=0x{:02x} OK ({} bytes result)",
                       rid, subfunc, resp_len);
-                store_response(&out[..total]);
+                if suppress {
+                    store_response(&[]);
+                } else {
+                    store_response(&out[..total]);
+                }
             }
             Err(nrc) => { store_response(&nrc.negative_response(0x31)); }
         }

@@ -11,12 +11,17 @@
 //! OTA is driven over FDCAN1 by the CANopen + UDS protocol stack — see
 //! `docs/superpowers/specs/2026-07-02-can-ota-uds-design.md`.
 
-use cortex_m::peripheral::SCB;
 use embedded_cli::cli::CliHandle;
 
 use crate::bsp::{BOARD_MCU, BOARD_NAME, FLASH_SIZE_KB, SRAM_SIZE_KB};
 use crate::motor::cmd::{OpenLoopCmd, OPEN_LOOP_CMD};
 use crate::motor::open_loop::MAX_OPENLOOP_V;
+
+/// Set by the `reboot` command; checked by the async shell task
+/// which performs the actual delay + NVIC reset.  The processor
+/// closure is sync, so the delay must happen in the async task.
+pub static REBOOT_REQUESTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// Maximum electrical frequency the `spin` command will accept, in Hz.
 /// Without a clamp, `spin 1e15 2.0` would put the motor task in the
@@ -131,15 +136,13 @@ where
             }
             ShellCommand::Reboot => {
                 let _ = cli.writer().write_str("Rebooting...\r\n");
-                // Disable the open-loop spin BEFORE the busy-wait
-                // so the motor task can't keep energising the
-                // phases for the full ~50 ms we're stalled here.
-                // The motor task sees `enabled = false` on its next
-                // tick (well within the delay window) and ramps
-                // voltage to 0 before the NVIC reset tears us down.
+                // Disable the open-loop spin so the motor task
+                // ramps voltage to 0 on its next tick.
                 run_stop(cli);
-                cortex_m::asm::delay(170_000_000 / 20); // ~50 ms at 170 MHz
-                SCB::sys_reset();
+                // Signal the async shell task to perform the
+                // delay + NVIC reset.  The processor closure is
+                // sync, so the async Timer must live in the task.
+                REBOOT_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
             }
             ShellCommand::Spin { freq_hz, voltage } => {
                 run_spin(cli, freq_hz, voltage);

@@ -14,7 +14,7 @@ use embassy_stm32::usart::{BufferedUartRx, BufferedUartTx};
 use embedded_cli::__private::io as eio06;
 use embedded_io_async::Read;
 
-use crate::shell::commands::{make_processor, ShellCommand};
+use crate::shell::commands::{make_processor, ShellCommand, REBOOT_REQUESTED};
 use crate::drivers::debug_uart::UsartError06;
 
 const CMD_BUF_SIZE: usize = 64;
@@ -87,5 +87,13 @@ pub async fn shell_task(tx: BufferedUartTx<'static>, mut rx: BufferedUartRx<'sta
         // The `C` generic parameter is `ShellCommand` (provides help /
         // autocomplete).  The `P` parameter is the processor closure.
         let _ = cli.process_byte::<ShellCommand, _>(buf[0], &mut processor);
+
+        // If the `reboot` command set the flag, perform the async
+        // delay here (yields to the executor so the motor task can
+        // ramp down) then fire NVIC reset.
+        if REBOOT_REQUESTED.load(core::sync::atomic::Ordering::Relaxed) {
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
+            cortex_m::peripheral::SCB::sys_reset();
+        }
     }
 }

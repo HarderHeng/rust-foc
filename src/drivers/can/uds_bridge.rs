@@ -42,6 +42,12 @@ pub const COB_ID_PHYSICAL_REQUEST: u16 = 0x7E0;
 /// Physical response COB-ID (= request + 8, per ISO 14229-3 §7).
 pub const COB_ID_PHYSICAL_RESPONSE: u16 = 0x7E8;
 
+/// SIDs that must not be accepted via functional (0x7DF) addressing.
+/// ISO 14229-1 §6.3: SecurityAccess (0x27) is a point-to-point service;
+/// accepting it on a broadcast COB-ID would let any node on the bus
+/// trigger seed/key exchanges intended for a single ECU.
+const FUNCTIONAL_BLOCKED_SIDS: &[u8] = &[0x27];
+
 /// True iff `id` is a UDS request we should handle (either
 /// functional broadcast or our physical address).
 fn is_uds_request_id(id: u16) -> bool {
@@ -92,6 +98,15 @@ impl UdsTransport for DefaultUdsTransport {
         }
         let request = parse_request_frame(frame);
         if request.is_empty() {
+            return None;
+        }
+        // ISO 14229-1 §6.3: reject security-sensitive SIDs on
+        // functional (0x7DF) addressing. These are point-to-point
+        // services that must not be broadcast.
+        if id == COB_ID_FUNCTIONAL_REQUEST
+            && !request.is_empty()
+            && FUNCTIONAL_BLOCKED_SIDS.contains(&request[0])
+        {
             return None;
         }
         uds::dispatch(request);
