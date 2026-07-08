@@ -206,6 +206,7 @@ pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     routines_result: ROUTINES_RESULT,
     pending_queue: unsafe { &mut *(&raw mut PENDING_QUEUE) },
     p2_server_ms: 50,
+    request_timeout_ms: 5000,
     sa_max_attempts: 3,
     key_masks: [
         AesBlock::from_bytes([

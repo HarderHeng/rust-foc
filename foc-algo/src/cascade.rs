@@ -142,10 +142,23 @@ impl FocController {
     /// current loop to update `self.duty`.
     ///
     /// When `dt ≤ 0` the call is a no-op — duty and integrators are frozen.
+    /// When any measurement is non-finite the call is also a no-op: duty
+    /// is zeroed as a safe default, but integrators and ramp state are
+    /// preserved so the loop can resume once the bad measurement clears.
     /// On mode change, ramps are seeded from current measurements for
     /// bumpless transfer.
     pub fn update<T: Trig>(&mut self, dt: f32) {
         if dt <= 0.0 {
+            return;
+        }
+        // NaN / Inf guard on measurements.  A transient ADC glitch or
+        // sensor stall must not poison the speed/current PIs.  Leave
+        // controller state intact, but force duty to safe zero this cycle.
+        if !self.meas.ia.is_finite() || !self.meas.ib.is_finite()
+            || !self.meas.theta.is_finite() || !self.meas.vdc.is_finite()
+            || !self.meas.speed.is_finite()
+        {
+            self.duty = Duty { ta: 0.0, tb: 0.0, tc: 0.0 };
             return;
         }
 
@@ -236,6 +249,11 @@ impl FocController {
         self.runtime.current_limited = false;
         self.runtime.demag_limited = false;
         self.duty = Duty { ta: 0.0, tb: 0.0, tc: 0.0 };
+        // Clear inner-loop runtime diagnostics so stale per-cycle values
+        // from the previous run don't linger when the user re-enables.
+        self.current.runtime = Default::default();
+        self.speed.runtime = Default::default();
+        self.position.runtime = Default::default();
         if self.reset_on_off {
             self.reset();
         }
@@ -668,6 +686,121 @@ mod tests {
         assert!(!c.runtime.demag_limited);
     }
 
+    // ── NaN / Inf measurement guard ──
+
+    #[test]
+    fn update_with_nan_measurement_is_safe() {
+        // Prime the controller so integrators and runtime have non-default
+        // values, then poison `meas.ia`.  Guard must (a) zero duty, (b) leave
+        // every integrator and runtime field at its pre-call value.
+        let mut c = make(Mode::Torque);
+        c.iq_ramp.rate_limit = 0.0;
+        c.speed_pid().kp = 1.0;
+        c.speed_pid().ki = 1.0;
+        c.target.iq = 1.0;
+        c.update::<LibmTrig>(0.01);
+        let speed_integral_before = c.speed.pid.integral;
+        let d_pid_integral_before = c.current.d_pid.integral;
+        let q_pid_integral_before = c.current.q_pid.integral;
+        let iq_target_before = c.runtime.iq_target;
+        let iq_command_before = c.runtime.iq_command;
+
+        // Inject the bad measurement.
+        c.meas.ia = f32::NAN;
+        c.update::<LibmTrig>(0.001);
+
+        // Duty forced to safe zero.
+        approx(c.duty.ta, 0.0);
+        approx(c.duty.tb, 0.0);
+        approx(c.duty.tc, 0.0);
+
+        // Integrator state preserved — the loop must recover once the
+        // measurement clears.
+        approx(c.speed.pid.integral, speed_integral_before);
+        approx(c.current.d_pid.integral, d_pid_integral_before);
+        approx(c.current.q_pid.integral, q_pid_integral_before);
+        approx(c.runtime.iq_target, iq_target_before);
+        approx(c.runtime.iq_command, iq_command_before);
+    }
+
+    #[test]
+    fn update_with_inf_measurement_is_safe() {
+        // Same shape as the NaN test, but with +Inf — both NaN and Inf
+        // must take the same guard path.
+        let mut c = make(Mode::Torque);
+        c.target.iq = 0.5;
+        c.update::<LibmTrig>(0.01);
+        let speed_integral_before = c.speed.pid.integral;
+
+        c.meas.vdc = f32::INFINITY;
+        c.update::<LibmTrig>(0.001);
+
+        approx(c.duty.ta, 0.0);
+        approx(c.duty.tb, 0.0);
+        approx(c.duty.tc, 0.0);
+        approx(c.speed.pid.integral, speed_integral_before);
+    }
+
+    #[test]
+    fn nan_guard_recovers_when_measurement_clears() {
+        // After a bad measurement, a clean measurement must run the loop
+        // normally — the guard is not a permanent latch.
+        let mut c = make(Mode::Torque);
+        c.target.iq = 1.0;
+        c.meas.ia = f32::NAN;
+        c.update::<LibmTrig>(0.001);
+        approx(c.duty.ta, 0.0);
+
+        c.meas.ia = 0.0;
+        c.update::<LibmTrig>(0.001);
+        // Duty now reflects the loop output (non-zero due to iq=1.0
+        // command into the SVPWM with vdc=24).
+        assert!(c.duty.ta > 0.0, "duty should be non-zero after recovery");
+    }
+
+    // ── Off-mode runtime cleanup ──
+
+    #[test]
+    fn off_mode_clears_inner_loop_runtime() {
+        // Populate the current/speed runtimes with non-zero values by
+        // running an active mode, then transition to Off.  The inner
+        // runtime structs must reset to default so stale diagnostics from
+        // the previous run don't linger.
+        let mut c = make(Mode::Speed);
+        c.iq_ramp.rate_limit = 0.0;
+        c.speed_pid().kp = 1.0;
+        c.current_pid_d().kp = 0.5;
+        c.current_pid_q().kp = 0.5;
+        c.target.speed_ref = 100.0;
+        c.meas.speed = 10.0;
+        c.meas.ia = 0.5;
+        c.meas.ib = -0.25;
+        c.update::<LibmTrig>(0.001);
+
+        // Sanity: runtime was actually populated.
+        let cr = c.current_runtime();
+        assert!(cr.id != 0.0 || cr.iq != 0.0 || cr.vd != 0.0 || cr.vq != 0.0,
+                "current runtime should have non-zero values after update");
+        assert!(c.speed_runtime().pi_output != 0.0
+                || c.speed_runtime().speed_measured != 0.0,
+                "speed runtime should have non-zero values after update");
+
+        c.set_mode(Mode::Off);
+        c.update::<LibmTrig>(0.001);
+
+        approx(c.current_runtime().id, 0.0);
+        approx(c.current_runtime().iq, 0.0);
+        approx(c.current_runtime().vd, 0.0);
+        approx(c.current_runtime().vq, 0.0);
+        assert!(!c.current_runtime().voltage_limited);
+        approx(c.speed_runtime().pi_output, 0.0);
+        approx(c.speed_runtime().ff_total, 0.0);
+        approx(c.speed_runtime().speed_measured, 0.0);
+        approx(c.position_runtime().pi_output, 0.0);
+        approx(c.position_runtime().ff_total, 0.0);
+        approx(c.position_runtime().position_measured, 0.0);
+    }
+
     // ── Circle limitation ──
 
     #[test] fn circle_limit_disabled_passes_through() {
@@ -833,6 +966,7 @@ mod tests {
             rs: motor.r, ls: motor.ld,
             k_slide, emf_cutoff: 200.0,
             pll_kp: kp_pll, pll_ki: ki_pll,
+            max_omega: 1000.0 * core::f32::consts::TAU,
         });
         smo.set_angle(0.0);
 

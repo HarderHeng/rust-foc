@@ -37,7 +37,7 @@
 //!   triggers NVIC reset. On the next boot the metadata is
 //!   already valid; no special "first-boot" branch needed.
 
-pub mod flash;
+use crate::drivers::flash;
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
@@ -324,13 +324,35 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
         return store_uds_negative(SID_REQUEST_TRANSFER_EXIT, nrc);
     }
 
-    // Verify the actual bytes delivered matches the declared
-    // size. We allow a partial last block (the trailing flush pads
-    // with 0xFF to the next 8-byte boundary), but anything more than
-    // 7 bytes short of `total` means the master gave up early or
-    // dropped a packet — refuse to mark the image valid in
-    // metadata; the bootloader would refuse it on next boot, but
-    // we'd have wasted a flash write + NVIC reset cycle.
+    // Verify the actual bytes delivered matches the declared size.
+    // Two failure modes to guard against:
+    //
+    // 1. Over-send — the master somehow delivered more bytes than
+    //    declared (defensive: with the current `saturating_sub` in
+    //    `handle_transfer_data` and the `OTA_REMAINING == 0`
+    //    short-circuit this can't actually happen, but a future
+    //    regression that loosens either guard would silently let
+    //    extra bytes land past the declared end of image. Reject
+    //    with 0x31 to make the overflow visible.
+    //
+    // 2. Short transfer — the master gave up early or dropped a
+    //    packet. We allow a partial last block (the trailing flush
+    //    pads with 0xFF to the next 8-byte boundary), but anything
+    //    more than 7 bytes short of `total` means the image is
+    //    incomplete. Refuse to mark it valid in metadata; the
+    //    bootloader would refuse it on next boot, but we'd have
+    //    wasted a flash write + NVIC reset cycle.
+    if bytes_delivered > total {
+        warn!(
+            "OTA: over-send (delivered {} > {}) → 0x31",
+            bytes_delivered, total
+        );
+        OTA_STATE.store(OtaState::Idle as u8, Ordering::Relaxed);
+        return store_uds_negative(
+            SID_REQUEST_TRANSFER_EXIT,
+            NRC::RequestOutOfRange,
+        );
+    }
     if bytes_delivered < total.saturating_sub(7) {
         warn!(
             "OTA: short transfer (delivered {} of {}) → 0x72",
@@ -384,7 +406,7 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
     };
 
     if unsafe {
-        flash::write_metadata(METADATA_MAGIC, image_size, crc, &version, build_ts)
+        flash::write_metadata(flash::METADATA_MAGIC, image_size, crc, &version, build_ts)
     }
     .is_err()
     {
@@ -459,6 +481,4 @@ fn crc32_update(crc: u32, byte: u8) -> u32 {
     c
 }
 
-/// Magic word at the start of the post-OTA metadata block.
-/// Must match `src/metadata.rs::METADATA_MAGIC`.
-const METADATA_MAGIC: u32 = 0xF0C1_001A;
+

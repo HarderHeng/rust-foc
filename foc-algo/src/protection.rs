@@ -100,6 +100,8 @@
 /// let iq_max = i2t.foldback(i_actual, dt);
 /// // Use iq_max as the upper bound on the speed-loop output.
 /// ```
+use libm::sqrtf;
+
 #[derive(Clone, Copy)]
 pub struct I2tLimiter {
     /// Rated continuous current (A RMS).
@@ -156,6 +158,121 @@ impl I2tLimiter {
     }
 }
 
+// ── Instant overcurrent ─────────────────────────────────────────────────────
+
+/// Single-cycle overcurrent trip.  Fires when the αβ current vector
+/// magnitude exceeds the configured threshold.  No debounce — the caller is
+/// expected to call `check()` exactly once per control cycle and act on
+/// the result before driving the PWM.  Use [`I2tLimiter`] for thermal
+/// integration; this is purely an instantaneous hardware-protection trip.
+#[derive(Clone, Copy, Debug)]
+pub struct InstantOvercurrent {
+    threshold_a: f32,
+}
+
+impl InstantOvercurrent {
+    /// Trip threshold (A).  |i| > threshold trips.
+    #[must_use]
+    pub const fn new(threshold_a: f32) -> Self {
+        Self { threshold_a }
+    }
+
+    /// True when |i| > threshold.
+    #[must_use]
+    pub fn check(&self, i_alpha: f32, i_beta: f32) -> bool {
+        sqrtf(i_alpha * i_alpha + i_beta * i_beta) > self.threshold_a
+    }
+}
+
+// ── Bus voltage monitor ─────────────────────────────────────────────────────
+
+/// DC bus voltage window monitor.  Returns an error when vdc falls outside
+/// `[vdc_min, vdc_max]`.  Useful as a per-cycle sanity check on the ADC
+/// reading (overvoltage → regen cap failure; undervoltage → brownout).
+#[derive(Clone, Copy, Debug)]
+pub struct BusVoltageMonitor {
+    vdc_min: f32,
+    vdc_max: f32,
+}
+
+impl BusVoltageMonitor {
+    /// Construct a window monitor.  Caller chooses `vdc_min < vdc_max`; if
+    /// the limits are inverted, the window collapses to an empty set and
+    /// every input is rejected.
+    #[must_use]
+    pub const fn new(vdc_min: f32, vdc_max: f32) -> Self {
+        Self { vdc_min, vdc_max }
+    }
+
+    /// `Ok` when `vdc ∈ [vdc_min, vdc_max]`, `Err` with a static label
+    /// otherwise.
+    #[must_use]
+    pub fn check(&self, vdc: f32) -> Result<(), &'static str> {
+        if vdc < self.vdc_min {
+            Err("undervoltage")
+        } else if vdc > self.vdc_max {
+            Err("overvoltage")
+        } else {
+            Ok(())
+        }
+    }
+}
+
+// ── Stall detector ──────────────────────────────────────────────────────────
+
+/// Stall detector — fires when commanded current is being delivered but
+/// the rotor is not moving.  Typical use: trip into `Mode::Off` after a
+/// sustained near-zero speed while `Iq` has been non-zero for at least
+/// the grace period.
+///
+/// `armed_at_ms == None` ⇒ detector is inert (returns `false`).  Call
+/// [`arm`](Self::arm) once Iq first becomes non-zero; the detector then
+/// becomes active for as long as it remains armed.  Call
+/// [`disarm`](Self::disarm) when Iq returns to zero or the controller
+/// leaves the active mode.
+#[derive(Clone, Copy, Debug)]
+pub struct StallDetector {
+    /// Speed magnitude below which we consider the rotor stalled (rad/s).
+    pub min_speed_rad_s: f32,
+    /// Grace period after arming (ms) during which the check is suppressed
+    /// — the rotor needs time to start moving from rest.
+    pub min_iq_after_ms: u32,
+    /// Wall-clock time (ms) at which [`arm`](Self::arm) was last called.
+    /// `None` ⇒ detector is disarmed / inert.
+    pub armed_at_ms: Option<u32>,
+}
+
+impl StallDetector {
+    #[must_use]
+    pub fn new(min_speed_rad_s: f32, min_iq_after_ms: u32) -> Self {
+        Self {
+            min_speed_rad_s,
+            min_iq_after_ms,
+            armed_at_ms: None,
+        }
+    }
+
+    /// Arm the detector (begin grace period).
+    pub fn arm(&mut self, now_ms: u32) {
+        self.armed_at_ms = Some(now_ms);
+    }
+
+    /// Disarm the detector (return to inert).
+    pub fn disarm(&mut self) {
+        self.armed_at_ms = None;
+    }
+
+    /// True when armed, grace period elapsed, and |speed| below threshold.
+    #[must_use]
+    pub fn check(&self, speed: f32, now_ms: u32) -> bool {
+        match self.armed_at_ms {
+            None => false,
+            Some(t) if now_ms.saturating_sub(t) < self.min_iq_after_ms => false,
+            Some(_) => speed.abs() < self.min_speed_rad_s,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +322,123 @@ mod tests {
         let _ = lim.foldback(30.0, 0.1);
         lim.reset();
         assert!((lim.accumulator() - 0.0).abs() < 1e-5);
+    }
+
+    // ── InstantOvercurrent ──
+
+    #[test]
+    fn instant_oc_below_threshold_safe() {
+        let oc = InstantOvercurrent::new(10.0);
+        assert!(!oc.check(0.0, 0.0));
+        assert!(!oc.check(7.0, 0.0));
+        assert!(!oc.check(3.0, 4.0));
+        assert!(!oc.check(-7.0, 0.0));
+    }
+
+    #[test]
+    fn instant_oc_at_threshold_safe() {
+        // |i| == threshold does NOT trip — only strictly greater does.
+        let oc = InstantOvercurrent::new(10.0);
+        assert!(!oc.check(10.0, 0.0));
+        assert!(!oc.check(0.0, 10.0));
+        assert!(!oc.check(6.0, 8.0));
+    }
+
+    #[test]
+    fn instant_oc_above_threshold_trips() {
+        let oc = InstantOvercurrent::new(10.0);
+        assert!(oc.check(10.0001, 0.0));
+        assert!(oc.check(7.0, 8.0));
+        assert!(oc.check(-11.0, 0.0));
+        assert!(oc.check(0.0, -10.0001));
+    }
+
+    #[test]
+    fn instant_oc_negative_threshold_always_trips() {
+        // Misconfigured negative threshold: any non-negative |i| is
+        // strictly greater than a negative threshold, so every input trips
+        // (including zero).  Documents the failure mode.
+        let oc = InstantOvercurrent::new(-1.0);
+        assert!(oc.check(0.0, 0.0));
+        assert!(oc.check(0.1, 0.0));
+    }
+
+    // ── BusVoltageMonitor ──
+
+    #[test]
+    fn bus_voltage_inside_window_ok() {
+        let mon = BusVoltageMonitor::new(12.0, 48.0);
+        assert!(mon.check(12.0).is_ok());
+        assert!(mon.check(24.0).is_ok());
+        assert!(mon.check(48.0).is_ok());
+    }
+
+    #[test]
+    fn bus_voltage_undervoltage_err() {
+        let mon = BusVoltageMonitor::new(12.0, 48.0);
+        assert_eq!(mon.check(11.99), Err("undervoltage"));
+        assert_eq!(mon.check(0.0), Err("undervoltage"));
+    }
+
+    #[test]
+    fn bus_voltage_overvoltage_err() {
+        let mon = BusVoltageMonitor::new(12.0, 48.0);
+        assert_eq!(mon.check(48.01), Err("overvoltage"));
+        assert_eq!(mon.check(100.0), Err("overvoltage"));
+    }
+
+    // ── StallDetector ──
+
+    #[test]
+    fn stall_disarmed_returns_false() {
+        let sd = StallDetector::new(1.0, 100);
+        assert!(!sd.check(0.0, 1000));
+        assert!(!sd.check(0.0, 0));
+    }
+
+    #[test]
+    fn stall_within_grace_period_returns_false() {
+        let mut sd = StallDetector::new(1.0, 100);
+        sd.arm(1000);
+        assert!(!sd.check(0.0, 1000));
+        assert!(!sd.check(0.0, 1050));
+        assert!(!sd.check(0.0, 1099));
+    }
+
+    #[test]
+    fn stall_after_grace_with_low_speed_trips() {
+        let mut sd = StallDetector::new(1.0, 100);
+        sd.arm(1000);
+        assert!(sd.check(0.0, 1100));
+        assert!(sd.check(0.5, 1100));
+        assert!(sd.check(-0.999, 1100));
+    }
+
+    #[test]
+    fn stall_after_grace_with_high_speed_safe() {
+        let mut sd = StallDetector::new(1.0, 100);
+        sd.arm(1000);
+        assert!(!sd.check(1.0, 1100));
+        assert!(!sd.check(50.0, 1100));
+        assert!(!sd.check(-1.0, 1100));
+    }
+
+    #[test]
+    fn stall_disarm_resets_to_inert() {
+        let mut sd = StallDetector::new(1.0, 100);
+        sd.arm(1000);
+        sd.disarm();
+        assert!(!sd.check(0.0, 5000));
+    }
+
+    #[test]
+    fn stall_rearm_resets_grace_clock() {
+        let mut sd = StallDetector::new(1.0, 100);
+        sd.arm(1000);
+        assert!(sd.check(0.0, 5000));
+        sd.arm(5000);
+        assert!(!sd.check(0.0, 5050));
+        assert!(sd.check(0.0, 5150));
     }
 
     fn approx(a: f32, b: f32) {

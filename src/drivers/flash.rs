@@ -55,6 +55,11 @@ pub const APP_END: u32 = 0x0801_F800;
 /// reader side (typically `src/metadata.rs`).
 pub const METADATA_ADDR: u32 = 0x0801_F800;
 
+/// Magic word at the start of the post-OTA metadata block.
+/// Must match `src/metadata.rs::METADATA_MAGIC` (which re-exports
+/// this). Writer side defines the layout the reader side validates.
+pub const METADATA_MAGIC: u32 = 0xF0C1_001A;
+
 #[derive(Debug)]
 pub enum FlashError {
     Unaligned,
@@ -162,13 +167,20 @@ pub fn read_u32(offset: u32) -> u32 {
 /// Write the post-OTA metadata block. Layout (must match the
 /// reader side, `src/metadata.rs::Metadata`):
 ///
-///   0x00: magic          (u32, LE)
-///   0x04: image_size     (u32, LE)
-///   0x08: image_crc      (u32, LE)
-///   0x0C: version[0..8]  (LE u64 — first 8 bytes of the
+///   0x00: magic           (u32, LE)
+///   0x04: image_size      (u32, LE)
+///   0x08: image_crc       (u32, LE)
+///   0x0C: build_timestamp (u32, LE)
+///   0x10: version[0..8]   (LE u64 — first 8 bytes of the
 ///                          null-padded UTF-8 version string)
-///   0x14: version[8..16] (LE u64 — second 8 bytes)
-///   0x1C: build_timestamp (u32, LE)
+///   0x18: version[8..16]  (LE u64 — second 8 bytes)
+///
+/// `build_timestamp` sits between the three u32s and the version
+/// block so both `version` u64 writes land on 8-byte boundaries.
+/// A previous version put `version` right after `image_crc`,
+/// packing the u64 writes at offsets 12 and 20 — not 8-aligned,
+/// which would hard-fault on Cortex-M targets with
+/// `UNALIGN_TRP = 1`.
 ///
 /// All four writes must land in the same page (the metadata
 /// block is one page); the cross-page check covers them all.
@@ -206,28 +218,28 @@ pub unsafe fn write_metadata(
     wait_busy();
     let r = check_and_clear_errors();
 
-    // u64 #1: image_crc + version[0..8] (LE).
-    let version_lo: u64 = u64::from_le_bytes(version[0..8].try_into().unwrap());
-    let word1: u64 = (image_crc as u64) | (version_lo << 32);
+    // u64 #1: image_crc + build_timestamp. build_timestamp sits
+    // here (not after version) so the two version u64 reads on
+    // the reader side land at 8-byte-aligned offsets 0x10/0x18.
+    let word1: u64 = (image_crc as u64) | ((build_timestamp as u64) << 32);
     if r.is_ok() {
         core::ptr::write_volatile((METADATA_ADDR + 8) as *mut u64, word1);
         wait_busy();
         let _ = check_and_clear_errors();
     }
 
-    // u64 #2: version[8..16] (LE) + padding.
-    let version_hi: u64 = u64::from_le_bytes(version[8..16].try_into().unwrap());
+    // u64 #2: version[0..8] (LE). 8-aligned.
+    let version_lo: u64 = u64::from_le_bytes(version[0..8].try_into().unwrap());
     if r.is_ok() {
-        let word2: u64 = version_hi; // upper 32 bits stay 0
-        core::ptr::write_volatile((METADATA_ADDR + 16) as *mut u64, word2);
+        core::ptr::write_volatile((METADATA_ADDR + 16) as *mut u64, version_lo);
         wait_busy();
         let _ = check_and_clear_errors();
     }
 
-    // u64 #3: padding + build_timestamp.
+    // u64 #3: version[8..16] (LE). 8-aligned.
+    let version_hi: u64 = u64::from_le_bytes(version[8..16].try_into().unwrap());
     if r.is_ok() {
-        let word3: u64 = build_timestamp as u64;
-        core::ptr::write_volatile((METADATA_ADDR + 24) as *mut u64, word3);
+        core::ptr::write_volatile((METADATA_ADDR + 24) as *mut u64, version_hi);
         wait_busy();
         let _ = check_and_clear_errors();
     }

@@ -125,6 +125,6 @@ pub use cascade::{FocController, Mode};
 pub use state::{ControllerState, Meas, Target};
 pub use motor::MotorParams;
 pub use field_weakening::field_weakening;
-pub use protection::I2tLimiter;
+pub use protection::{BusVoltageMonitor, I2tLimiter, InstantOvercurrent, StallDetector};
 #[cfg(feature = "libm-trig")]
 pub use observer::{SmoConfig, SmoObserver, SmoRuntime, pll_pi_gains};

@@ -55,14 +55,48 @@ fn response_id_for_request(_request_id: u16) -> u16 {
     COB_ID_PHYSICAL_RESPONSE
 }
 
-/// True iff the given frame is addressed to one of our UDS
-/// request COB-IDs (functional 0x7DF or physical 0x7E0).
-pub fn is_uds_frame(frame: &FdFrame) -> bool {
-    let id = match frame.header().id() {
-        Id::Standard(s) => s.as_raw(),
-        Id::Extended(_) => return false,
-    };
-    is_uds_request_id(id)
+/// UDS transport adapter. `DefaultUdsTransport` is the
+/// production implementation over real CAN-FD frames; the
+/// `UdsTransport` trait lets tests substitute a mock without
+/// driving the FDCAN hardware.
+pub trait UdsTransport {
+    /// True iff the given frame is addressed to one of our UDS
+    /// request COB-IDs (functional 0x7DF or physical 0x7E0).
+    fn is_uds_frame(&self, frame: &FdFrame) -> bool;
+
+    /// Handle one received UDS request frame. The frame must
+    /// pass `is_uds_frame` (checked by the caller). Builds the
+    /// UDS request slice, runs the dispatcher, and returns the
+    /// response frame.
+    fn handle_rx_frame(&self, frame: &FdFrame) -> Option<FdFrame>;
+}
+
+pub struct DefaultUdsTransport;
+
+impl UdsTransport for DefaultUdsTransport {
+    fn is_uds_frame(&self, frame: &FdFrame) -> bool {
+        let id = match frame.header().id() {
+            Id::Standard(s) => s.as_raw(),
+            Id::Extended(_) => return false,
+        };
+        is_uds_request_id(id)
+    }
+
+    fn handle_rx_frame(&self, frame: &FdFrame) -> Option<FdFrame> {
+        let id = match frame.header().id() {
+            Id::Standard(s) => s.as_raw(),
+            Id::Extended(_) => return None,
+        };
+        if !is_uds_request_id(id) {
+            return None;
+        }
+        let request = parse_request_frame(frame);
+        if request.is_empty() {
+            return None;
+        }
+        uds::dispatch(request);
+        build_response_frame(id)
+    }
 }
 
 // ============================================================================
@@ -94,28 +128,4 @@ fn parse_request_frame<'a>(frame: &'a FdFrame) -> &'a [u8] {
     let len = frame.header().len() as usize;
     let data = frame.data();
     if len <= data.len() { &data[..len] } else { data }
-}
-
-// ============================================================================
-// Main entry point called from canopen_task
-// ============================================================================
-
-/// Handle one received UDS request frame (CAN-FD, 64-byte max).
-/// The frame must pass `is_uds_frame` (checked by the caller).
-/// Builds the UDS request slice, runs the dispatcher, and
-/// returns the response frame.
-pub fn handle_rx_frame(frame: &FdFrame) -> Option<FdFrame> {
-    let id = match frame.header().id() {
-        Id::Standard(s) => s.as_raw(),
-        Id::Extended(_) => return None,
-    };
-    if !is_uds_request_id(id) {
-        return None;
-    }
-    let request = parse_request_frame(frame);
-    if request.is_empty() {
-        return None;
-    }
-    uds::dispatch(request);
-    build_response_frame(id)
 }

@@ -66,10 +66,13 @@ async fn main(spawner: Spawner) {
         cortex_m::singleton!(: embassy_stm32::can::Can<'static> = can)
             .expect("Can singleton taken twice");
 
+    static UDS_TRANSPORT: drivers::can::uds_bridge::DefaultUdsTransport =
+        drivers::can::uds_bridge::DefaultUdsTransport;
+
     // Spawn the CANopen task — NMT state machine + 1 Hz heartbeat
     // over FDCAN1. This is the OTA-side protocol stack (Phase 2
     // adds SDO, Phase 3 adds UDS, Phase 4 adds OTA transfer).
-    spawner.spawn(tasks::canopen_task(can).unwrap());
+    spawner.spawn(tasks::canopen_task(can, &UDS_TRANSPORT).unwrap());
 
     // Main task: park in WFI forever. Real work happens in spawned tasks.
     loop {

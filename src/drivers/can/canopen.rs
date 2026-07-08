@@ -49,11 +49,11 @@ use embassy_futures::select::{select, Either};
 use embassy_stm32::can::{Can, Frame};
 use embassy_time::{Duration, Ticker};
 
+use crate::drivers::can::uds_bridge::UdsTransport;
 use crate::ota;
 use crate::uds;
 use uds_core::dtc;
 use embassy_time::Instant;
-use crate::drivers::can::uds_bridge as uds_transport;
 
 /// Heartbeat producer period in milliseconds. Was previously
 /// in `src/can/od.rs` (deleted in Phase 6 along with the
@@ -189,7 +189,7 @@ pub fn build_heartbeat_frame(state: NmtState) -> Frame {
 /// mid-transfer.
 #[embassy_executor::task]
 #[link_section = ".data"]
-pub async fn canopen_task(can: &'static mut Can<'static>) {
+pub async fn canopen_task(can: &'static mut Can<'static>, transport: &'static dyn UdsTransport) {
     info!("CANopen: node {} starting", NODE_ID);
 
     // Boot-up: send a one-shot frame with state byte = 0x00 per
@@ -283,14 +283,14 @@ pub async fn canopen_task(can: &'static mut Can<'static>) {
                             }
                         }
                     }
-                } else if uds_transport::is_uds_frame(&frame) {
+                } else if transport.is_uds_frame(&frame) {
                     // UDS transport: dispatch the UDS request
                     // directly (no CANopen SDO tunnel in Phase 6+).
                     // Phase 6 commit 2: UDS uses CAN-FD frames
                     // (up to 64 bytes) so a single frame covers
                     // even the long services (0x34 RequestDownload
                     // = 11 bytes, 0x19 ReadDTC with many DTCs).
-                    if let Some(response) = uds_transport::handle_rx_frame(&frame) {
+                    if let Some(response) = transport.handle_rx_frame(&frame) {
                         // Wrap the TX in a timeout. If FDCAN1 enters
                         // bus-off (wiring fault, error storm), the
                         // embassy write future can pend indefinitely;

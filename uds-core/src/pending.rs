@@ -110,6 +110,24 @@ pub fn tick(state: &mut UdsState, config: &mut UdsConfig, now_ms: u32) {
             state.request_tick_ms = now_ms;
         }
     }
+
+    // 6. P2* timeout: after P2* elapsed without the pending closure
+    //    completing, give up — drain the queue, flip to Idle, and
+    //    emit NRC 0x72 (GeneralProgrammingFailure).
+    if state.state == SrvState::Pending {
+        if now_ms.saturating_sub(state.request_tick_ms) >= config.request_timeout_ms {
+            for slot in config.pending_queue.iter_mut() {
+                *slot = None;
+            }
+            state.state = SrvState::Idle;
+            state.request_tick_ms = now_ms;
+            if state.request_len > 0 {
+                let sid = state.request_buf[0];
+                let bytes = Nrc::GeneralProgrammingFailure.negative_response(sid);
+                store_response(&bytes);
+            }
+        }
+    }
 }
 
 /// Push a 0x78 ResponsePending frame into the response buffer.

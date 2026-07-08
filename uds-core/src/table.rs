@@ -11,6 +11,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
+use subtle::ConstantTimeEq;
+
 use crate::crypto::{generate_key, AesBlock};
 use crate::pending::{push_pending, PendingFn, UdsContext};
 use crate::state::{store_response, UdsState};
@@ -133,6 +135,14 @@ pub struct UdsConfig {
     /// pushes a 0x78 response. ISO 14229 standard: 50 ms.
     pub p2_server_ms: u32,
 
+    /// P2* server timer (ms). After this many ms in
+    /// `SrvState::Pending` without the pending closure
+    /// completing, the dispatcher gives up: drains the queue,
+    /// flips back to Idle, and pushes an NRC 0x72
+    /// (GeneralProgrammingFailure). ISO 14229-1 §6.5.2.4 standard:
+    /// 5000 ms.
+    pub request_timeout_ms: u32,
+
     /// Maximum consecutive SecurityAccess (0x27) SendKey failures
     /// before the ECU returns 0x36 ExceededNumberOfAttempts (ISO
     /// 14229-1 §7.22). The counter resets on successful unlock,
@@ -242,7 +252,7 @@ impl UdsConfig {
 
     // -- 0x11 ECUReset -----------------------------------------------
 
-    pub fn dispatch_0x11(&self, _state: &mut UdsState, req: &[u8]) {
+    pub fn dispatch_0x11(&self, state: &mut UdsState, req: &[u8]) {
         // [0x11, subfunc] → [0x51, subfunc]; subfunc 0x01=Hard, 0x03=Soft.
         if req.len() != 2 {
             store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
@@ -252,6 +262,7 @@ impl UdsConfig {
         let subfunc = req[1];
         match subfunc {
             0x01 | 0x03 => {
+                state.sa_fail_count = 0;
                 RESET_REQUESTED.store(true, Ordering::Relaxed);
                 RESET_SUBFUNC.store(subfunc, Ordering::Relaxed);
                 uds_log!("UDS: ECUReset({}) requested",
@@ -483,7 +494,16 @@ impl UdsConfig {
             return false;
         }
         match self.request_download_fn {
-            Some(f) => push_pending(state, self, f as PendingFn),
+            Some(f) => {
+                if push_pending(state, self, f as PendingFn) {
+                    true
+                } else {
+                    store_response(
+                        &Nrc::ConditionsNotCorrect.negative_response(0x34),
+                    );
+                    false
+                }
+            }
             None => {
                 store_response(&Nrc::RequestOutOfRange.negative_response(0x34));
                 false
@@ -500,7 +520,16 @@ impl UdsConfig {
             return false;
         }
         match self.transfer_data_fn {
-            Some(f) => push_pending(state, self, f as PendingFn),
+            Some(f) => {
+                if push_pending(state, self, f as PendingFn) {
+                    true
+                } else {
+                    store_response(
+                        &Nrc::ConditionsNotCorrect.negative_response(0x36),
+                    );
+                    false
+                }
+            }
             None => {
                 store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
                     .negative_response(0x36));
@@ -518,7 +547,16 @@ impl UdsConfig {
             return false;
         }
         match self.transfer_exit_fn {
-            Some(f) => push_pending(state, self, f as PendingFn),
+            Some(f) => {
+                if push_pending(state, self, f as PendingFn) {
+                    true
+                } else {
+                    store_response(
+                        &Nrc::ConditionsNotCorrect.negative_response(0x37),
+                    );
+                    false
+                }
+            }
             None => {
                 store_response(&Nrc::IncorrectMessageLengthOrInvalidFormat
                     .negative_response(0x37));
@@ -597,9 +635,30 @@ impl UdsConfig {
             ServiceHandler::RoutineStart   => self.dispatch_0x31(state, request, RoutineSub::Start),
             ServiceHandler::RoutineStop    => self.dispatch_0x31(state, request, RoutineSub::Stop),
             ServiceHandler::RoutineResult  => self.dispatch_0x31(state, request, RoutineSub::Result),
-            ServiceHandler::RequestDownload => { let _ = self.dispatch_0x34(state); }
-            ServiceHandler::TransferData   => { let _ = self.dispatch_0x36(state); }
-            ServiceHandler::TransferExit   => { let _ = self.dispatch_0x37(state); }
+            ServiceHandler::RequestDownload => {
+                if !self.dispatch_0x34(state) {
+                    // dispatch_0x34 already wrote an NRC via
+                    // store_response (length check, push_pending
+                    // queue-full, or request_download_fn None).
+                    // Nothing more to do.
+                }
+            }
+            ServiceHandler::TransferData   => {
+                if !self.dispatch_0x36(state) {
+                    // dispatch_0x36 already wrote an NRC via
+                    // store_response (length check, push_pending
+                    // queue-full, or transfer_data_fn None).
+                    // Nothing more to do.
+                }
+            }
+            ServiceHandler::TransferExit   => {
+                if !self.dispatch_0x37(state) {
+                    // dispatch_0x37 already wrote an NRC via
+                    // store_response (length check, push_pending
+                    // queue-full, or transfer_exit_fn None).
+                    // Nothing more to do.
+                }
+            }
             ServiceHandler::TesterPresent  => self.dispatch_0x3e(state, request),
         }
         uds_log!("UDS: dispatched SID 0x{:02x}", sid);
@@ -707,7 +766,7 @@ fn sa_send_key(state: &mut UdsState, config: &UdsConfig, sal: u8,
     } else {
         generate_key(&AesBlock(state.current_seed), &config.key_masks[(sal - 1) as usize])
     };
-    if rx_key != expected.0 {
+    if !bool::from(rx_key.ct_eq(&expected.0)) {
         state.sa_fail_count = state.sa_fail_count.saturating_add(1);
         uds_log!("UDS: SecurityAccess SAL{} wrong key (fail #{})",
               sal, state.sa_fail_count);
@@ -723,3 +782,17 @@ fn sa_send_key(state: &mut UdsState, config: &UdsConfig, sal: u8,
 // OTA pending closures live in the platform's config, registered via
 // `UdsConfig::request_download_fn / transfer_data_fn / transfer_exit_fn`.
 // When `None`, the SID returns an NRC — zero OTA coupling.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sa_compare_is_used_path() {
+        // Smoke test that the constant-time compare path compiles and runs.
+        let a = [0u8; 16];
+        let b = [1u8; 16];
+        assert!(!bool::from(a.ct_eq(&b)));
+        assert!(bool::from(a.ct_eq(&a)));
+    }
+}

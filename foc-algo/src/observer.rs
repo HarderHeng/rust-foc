@@ -85,6 +85,12 @@ pub struct SmoConfig {
     pub pll_kp: f32,
     /// PLL integral gain.
     pub pll_ki: f32,
+    /// Maximum allowed PLL-estimated electrical speed magnitude (rad/s).
+    /// The PLL integrator is clamped to `±max_omega` so a sustained large
+    /// tracking error (e.g. during lock acquisition or a sensor fault)
+    /// cannot wind `omega_hat` up to infinity.  Default:
+    /// 1000 Hz electrical (`1000 · 2π` rad/s ≈ 6283 rad/s).
+    pub max_omega: f32,
 }
 
 /// Per-cycle diagnostic values.
@@ -170,7 +176,9 @@ impl SmoObserver {
     /// transform them to αβ.  `i_d, i_q` are the measured currents in the
     /// rotor frame — typically obtained from `CurrentLoop::runtime`.
     ///
-    /// When `dt ≤ 0`, the call is a no-op.
+    /// When `dt ≤ 0` or any input is non-finite, the call is a no-op —
+    /// state and runtime diagnostics are left untouched so a transient
+    /// ADC glitch cannot NaN-poison the PLL.
     pub fn update_dq<T: crate::math::Trig>(
         &mut self,
         v_d: f32, v_q: f32, theta: f32,
@@ -178,6 +186,14 @@ impl SmoObserver {
         dt: f32,
     ) {
         if dt <= 0.0 {
+            return;
+        }
+        // NaN / Inf guard — same rationale as `update()`.
+        if !v_d.is_finite() || !v_q.is_finite()
+            || !theta.is_finite()
+            || !i_d.is_finite() || !i_q.is_finite()
+            || !dt.is_finite()
+        {
             return;
         }
         let v_ab = crate::math::inv_park::<T>(
@@ -205,6 +221,14 @@ impl SmoObserver {
         if dt <= 0.0 {
             return;
         }
+        // NaN / Inf guard — mirror `decoupling_voltage`.  A bad measurement
+        // or voltage reference must not NaN-poison the integrator or PLL.
+        if !v_alpha.is_finite() || !v_beta.is_finite()
+            || !i_alpha.is_finite() || !i_beta.is_finite()
+            || !dt.is_finite()
+        {
+            return;
+        }
 
         // Current observer error
         let err_alpha = self.i_alpha_hat - i_alpha;
@@ -227,10 +251,12 @@ impl SmoObserver {
         self.runtime.e_beta  = e_beta;
 
         // Raw angle: θ = atan2(−e_α, e_β).  Normalise to [0, 2π).
-        let mut theta_raw = atan2f(-e_alpha, e_beta);
-        if theta_raw < 0.0 {
-            theta_raw += core::f32::consts::TAU;
-        }
+        // Manual float-mod to [0, TAU) — rem_euclid is std-only.
+        let theta = atan2f(-e_alpha, e_beta);
+        let theta_raw = {
+            let m = theta % core::f32::consts::TAU;
+            if m < 0.0 { m + core::f32::consts::TAU } else { m }
+        };
         self.runtime.theta_raw = theta_raw;
 
         // PLL — wrap error to [−π, π], then integrate.
@@ -242,7 +268,13 @@ impl SmoObserver {
         }
         self.runtime.pll_error = pll_error;
 
+        // Anti-windup: clamp the integrator to ±max_omega so a sustained
+        // large tracking error cannot drive omega_hat to infinity.  The
+        // output `omega_hat = kp·error + integral` therefore also lands
+        // within ±(max_omega + kp·π).
         self.pll_integral += self.cfg.pll_ki * pll_error * dt;
+        self.pll_integral = self.pll_integral
+            .clamp(-self.cfg.max_omega, self.cfg.max_omega);
         self.omega_hat = self.cfg.pll_kp * pll_error + self.pll_integral;
         self.theta_hat += self.omega_hat * dt;
 
@@ -297,6 +329,7 @@ mod tests {
             emf_cutoff: 200.0,
             pll_kp: 0.1,
             pll_ki: 10.0,
+            max_omega: 1000.0 * core::f32::consts::TAU,
         }
     }
 
@@ -397,6 +430,54 @@ mod tests {
         assert!((smo.theta_hat() - 1.0).abs() < 1e-5);
     }
 
+    // ── NaN / Inf guard ──
+
+    #[test]
+    fn update_with_nan_input_is_noop() {
+        let mut smo = SmoObserver::new(default_cfg());
+        smo.set_angle(1.0);
+        smo.set_speed(50.0);
+        for _ in 0..20 {
+            smo.update(0.0, 0.0, 0.0, 0.0, 0.0001);
+        }
+        let theta_before = smo.theta_hat();
+        let omega_before = smo.omega_hat();
+        let integral_before = smo.pll_integral;
+        let i_alpha_before = smo.i_alpha_hat;
+        let i_beta_before = smo.i_beta_hat;
+
+        smo.update(f32::NAN, 0.0, 0.1, 0.0, 0.0001);
+        approx(smo.theta_hat(), theta_before);
+        approx(smo.omega_hat(), omega_before);
+        approx(smo.pll_integral, integral_before);
+        approx(smo.i_alpha_hat, i_alpha_before);
+        approx(smo.i_beta_hat, i_beta_before);
+
+        smo.update(f32::NAN, f32::NAN, f32::NAN, f32::NAN, 0.0001);
+        approx(smo.theta_hat(), theta_before);
+        approx(smo.omega_hat(), omega_before);
+    }
+
+    #[test]
+    fn update_dq_with_nan_input_is_noop() {
+        let mut smo = SmoObserver::new(default_cfg());
+        smo.set_angle(0.5);
+        smo.set_speed(20.0);
+        for _ in 0..10 {
+            smo.update_dq::<LibmTrig>(1.0, 2.0, 0.5, 0.1, 0.2, 0.0001);
+        }
+        let theta_before = smo.theta_hat();
+        let omega_before = smo.omega_hat();
+
+        smo.update_dq::<LibmTrig>(f32::NAN, 0.0, 0.5, 0.1, 0.2, 0.0001);
+        approx(smo.theta_hat(), theta_before);
+        approx(smo.omega_hat(), omega_before);
+
+        smo.update_dq::<LibmTrig>(0.0, 0.0, f32::INFINITY, 0.0, 0.0, 0.0001);
+        approx(smo.theta_hat(), theta_before);
+        approx(smo.omega_hat(), omega_before);
+    }
+
     // ── PLL tuning ──
 
     #[test]
@@ -404,5 +485,47 @@ mod tests {
         let (kp, ki) = pll_pi_gains(10.0);
         assert!(kp > 80.0 && kp < 100.0);
         assert!(ki > 3500.0 && ki < 4500.0);
+    }
+
+    // ── PLL anti-windup + angle wrap ──
+
+    #[test]
+    fn pll_integral_clamped_at_max_omega() {
+        let cfg = SmoConfig {
+            rs: 0.5, ls: 0.0005, k_slide: 50.0, emf_cutoff: 200.0,
+            pll_kp: 0.1, pll_ki: 1000.0,
+            max_omega: 100.0,
+        };
+        let mut smo = SmoObserver::new(cfg);
+        smo.set_angle(0.0);
+        for _ in 0..500 {
+            smo.update(0.0, 0.0, 5.0, 5.0, 0.001);
+        }
+        assert!(smo.pll_integral <= cfg.max_omega + 1e-3);
+        assert!(smo.pll_integral >= -cfg.max_omega - 1e-3);
+        let bound = cfg.max_omega + cfg.pll_kp * core::f32::consts::PI + 1e-3;
+        assert!(smo.omega_hat().abs() <= bound);
+    }
+
+    #[test]
+    fn angle_wrap_large_negative_returns_in_range() {
+        let mut smo = SmoObserver::new(default_cfg());
+        for _ in 0..100 {
+            smo.update(1.0, 0.0, 0.0, 0.0, 0.0001);
+        }
+        let raw = smo.runtime.theta_raw;
+        assert!(raw >= 0.0 && raw < core::f32::consts::TAU + 1e-3,
+                "theta_raw={raw} out of [0, TAU)");
+
+        for _ in 0..1000 {
+            smo.update(1.0, 0.0, 0.0, 0.0, 0.0001);
+        }
+        let th = smo.theta_hat();
+        assert!(th >= 0.0 && th < core::f32::consts::TAU + 1e-3,
+                "theta_hat={th} out of [0, TAU)");
+    }
+
+    fn approx(a: f32, b: f32) {
+        assert!((a - b).abs() < 1e-5, "expected {b}, got {a}");
     }
 }

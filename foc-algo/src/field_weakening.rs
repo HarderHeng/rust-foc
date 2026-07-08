@@ -57,6 +57,15 @@ const SQRT_3: f32 = 1.732_050_8;
 /// ```
 #[must_use]
 pub fn field_weakening(vdc: f32, omega_e: f32, flux_linkage: f32, ld: f32) -> f32 {
+    // Runtime guard first: a hardware-bad config (zero or negative `ld` /
+    // `vdc`) would divide by zero or invert the polarity of the result.
+    // Return the safe sentinel so the current loop sees id_ref = 0 and
+    // the controller stays in MTPA.  Matches the `mtpa()` early-return
+    // shape.  Must run BEFORE the `debug_assert!` calls below because
+    // those panic on the same inputs in debug builds.
+    if ld <= 0.0 || vdc <= 0.0 {
+        return 0.0;
+    }
     debug_assert!(ld > 0.0, "Ld must be positive");
     debug_assert!(vdc > 0.0, "Vdc must be positive");
 
@@ -163,6 +172,28 @@ mod tests {
         let id = field_weakening(24.0, 1_000_000.0, 0.01, 0.001);
         assert!(id < -9.9, "id={id} should approach -10 at high speed");
         assert!(id >= -10.0, "id={id} must never exceed characteristic current");
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn field_weakening_zero_ld_returns_zero() {
+        // Above-base-speed conditions so the function would normally return
+        // a negative id_ref — the runtime guard must instead return 0.
+        // Gated to release-only: in debug builds the `debug_assert!(ld > 0.0)`
+        // intentionally panics on programmer error before the runtime guard.
+        let id = field_weakening(24.0, 2000.0, 0.01, 0.0);
+        approx(id, 0.0);
+        let id = field_weakening(24.0, 2000.0, 0.01, -0.0001);
+        approx(id, 0.0);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn field_weakening_zero_vdc_returns_zero() {
+        let id = field_weakening(0.0, 2000.0, 0.01, 0.001);
+        approx(id, 0.0);
+        let id = field_weakening(-1.0, 2000.0, 0.01, 0.001);
+        approx(id, 0.0);
     }
 
     // ── MTPA ──

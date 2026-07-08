@@ -611,6 +611,7 @@ class FirmwareEmulator:
         if len(p) != 1 or p[0] not in (0x01, 0x03):
             self.last_response = bytes([0x7F, SID_ER, NRC_SUB_FUNC_NOT_SUPPORTED])
             return
+        self.sa_fail_count = 0
         self.last_response = bytes([SID_ER + 0x40, p[0]])
 
     def _uds_cdi(self, p: bytes) -> None:
