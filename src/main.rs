@@ -33,22 +33,12 @@ async fn main(spawner: Spawner) {
     let handles = bsp::board_init(p);
     info!("board_init done; USART2 ringbuffer ready");
 
-    // Start IWDG early — bootloader's failover counter increments on
-    // watchdog reset, so we must feed before the first timeout (~125 ms).
+    // Start IWDG so the watchdog doesn't trip before tasks are up.
     feed_watchdog();
 
-    // Log firmware metadata if a valid block was injected into flash.
-    if let Some(meta) = metadata::read() {
-        let version_str = core::str::from_utf8(&meta.version).unwrap_or("?");
-        info!("Firmware: {} (built {})", version_str, meta.build_timestamp);
-        info!("  image: {} bytes, CRC32 0x{:08x}", meta.image_size, meta.image_crc32);
-    } else {
-        info!("No valid metadata (first boot or unprogrammed)");
-    }
+    // Log firmware identity.
+    info!("Firmware: {} (git {})", env!("FOC_VERSION"), env!("FOC_GIT_SHA"));
 
-    // Split the BSP handles into the three task owners (motor pwm,
-    // CAN, debug uart) so the partial-move borrow checker doesn't
-    // try to re-use `handles` after the first `move`.
     let BoardHandles { debug_uart, motor_pwm, can } = handles;
 
     // Split the BufferedUart into TX / RX halves so the shell task

@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-foc-shared = { path = "../shared" }
+embassy-boot-stm32 = { version = "0.8", default-features = false }
+embassy-stm32 = { version = "0.6", features = ["stm32g431cb"] }
+embassy-sync = "0.8"
 cortex-m-rt = "0.7"
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }

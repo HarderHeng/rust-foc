@@ -1,5 +1,5 @@
 [workspace]
-members = ["common", "foc-algo", "uds-core", "shared", "bootloader"]
+members = ["common", "foc-algo", "uds-core", "bootloader"]
 resolver = "2"
 
 [package]
@@ -7,10 +7,9 @@ name = "foc-rust"
 version = "0.1.0"
 edition = "2021"
 authors = ["heng"]
-description = "FOC firmware — dual-slot, bootloader + app"
 
 [dependencies]
-foc-shared = { path = "shared" }
+embassy-boot-stm32 = { version = "0.8", default-features = false }
 foc-common = { path = "common" }
 foc-algo = { path = "foc-algo" }
 uds-core = { path = "uds-core", default-features = false }

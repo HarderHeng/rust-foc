@@ -43,7 +43,12 @@ use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use critical_section::Mutex;
 use defmt::{info, warn};
-use foc_shared;
+
+// DFU partition (embassy-boot swap model)
+const DFU_START:  u32 = 0x0801_3000;
+const DFU_END:    u32 = 0x0801_F800; // 50 KB
+const STATE_ADDR: u32 = 0x0800_6000;
+const SWAP_MAGIC: u8  = 0xF0;
 
 
 // ---- UDS service IDs (subset) -----------------------------------------
@@ -140,8 +145,7 @@ pub fn handle_request_download(payload: &[u8]) -> usize {
     let size = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]) as usize;
 
     // Target the OTHER slot.
-    let (target_start, target_end) = flash::other_slot_range();
-    if size == 0 || size > (target_end - target_start) as usize {
+    if size == 0 || size > (DFU_END - DFU_START) as usize {
         return store_uds_negative(SID_REQUEST_DOWNLOAD, NRC::RequestOutOfRange);
     }
 
@@ -153,8 +157,8 @@ pub fn handle_request_download(payload: &[u8]) -> usize {
 
     // Erase the app region. 124 KB / 2 KB = 62 pages; each
     // erase is a few ms. Total ~50–100 ms.
-    info!("OTA: erasing target slot ({} bytes)", size);
-    if let Err(_e) = unsafe { flash::erase_region(target_start, target_end) } {
+    info!("OTA: erasing DFU partition ({} bytes)", size);
+    if let Err(_e) = unsafe { flash::erase_region(DFU_START, DFU_END) } {
         warn!("OTA: erase failed");
         return store_uds_negative(SID_REQUEST_DOWNLOAD, NRC::GeneralProgrammingFailure);
     }
@@ -163,9 +167,9 @@ pub fn handle_request_download(payload: &[u8]) -> usize {
     OTA_STATE.store(OtaState::Receiving as u8, Ordering::Relaxed);
     OTA_TOTAL_SIZE.store(size as u32, Ordering::Relaxed);
     OTA_REMAINING.store(size as u32, Ordering::Relaxed);
-    OTA_NEXT_OFFSET.store(target_start, Ordering::Relaxed);
-    OTA_TARGET_START.store(target_start, Ordering::Relaxed);
-    OTA_TARGET_END.store(target_end, Ordering::Relaxed);
+    OTA_NEXT_OFFSET.store(DFU_START, Ordering::Relaxed);
+    OTA_TARGET_START.store(DFU_START, Ordering::Relaxed);
+    OTA_TARGET_END.store(DFU_END, Ordering::Relaxed);
     OTA_CRC32.store(0xFFFF_FFFF, Ordering::Relaxed);
     NEXT_BLOCK_SEQ.store(1, Ordering::Relaxed);
     critical_section::with(|cs| {
@@ -403,61 +407,13 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
         info!("OTA: flash CRC OK");
     }
 
-    // Write the metadata block. We persist the full 32-byte
-    // struct: magic, image_size, image_crc, the build-time
-    // version string, and the build timestamp. The build.rs
-    // sets FOC_VERSION + FOC_BUILD_TIMESTAMP as cargo:rustc-env
-    // vars; we copy them into a 16-byte null-padded buffer for
-    // the version field. The reader (src/metadata.rs::read)
-    // rejects blocks where version/timestamp are all-zero or
-    // all-0xFF, so a fresh chip with no OTA yet shows "No
-    // valid metadata" in the boot log instead of stale data.
-    let mut version = [0u8; 16];
-    let vbytes = env!("FOC_VERSION").as_bytes();
-    let copy_len = vbytes.len().min(16);
-    version[..copy_len].copy_from_slice(&vbytes[..copy_len]);
-    let build_ts: u32 = {
-        // FOC_BUILD_TIMESTAMP is a decimal string set by build.rs;
-        // parse it at compile-time-ish (s_to_i is not const, so use a
-        // simple byte-by-byte parser that's good enough for the
-        // 10-digit values we expect).
-        let s = env!("FOC_BUILD_TIMESTAMP");
-        let mut v: u32 = 0;
-        for &b in s.as_bytes() {
-            if b'0' <= b && b <= b'9' {
-                v = v.saturating_mul(10).saturating_add((b - b'0') as u32);
-            } else {
-                break;
-            }
-        }
-        v
-    };
-
-    if unsafe {
-        flash::write_metadata(flash::other_metadata_addr(), flash::METADATA_MAGIC, image_size, crc, &version, build_ts)
-    }
-    .is_err()
-    {
-        warn!("OTA: metadata write failed");
-        OTA_STATE.store(OtaState::Idle as u8, Ordering::Relaxed);
-        return store_uds_negative(
-            SID_REQUEST_TRANSFER_EXIT,
-            NRC::GeneralProgrammingFailure,
-        );
-    }
-
-    // Switch SlotConfig so bootloader boots the other slot.
-    let other_slot = (flash::current_slot() ^ 1) as u8;
-    let cfg = foc_shared::SlotConfig {
-        magic: foc_shared::SLOT_CONFIG_MAGIC, active_slot: other_slot,
-        boot_attempts: 0, flags: 0,
-    };
-    if let Err(_) = unsafe { flash::write_slot_config(cfg.to_u64()) } {
-        warn!("OTA: slot config write failed");
+    // Set SWAP_MAGIC so embassy-boot swaps DFU → ACTIVE on next boot.
+    if let Err(_) = unsafe { write_swap_magic() } {
+        warn!("OTA: SWAP_MAGIC write failed");
         OTA_STATE.store(OtaState::Idle as u8, Ordering::Relaxed);
         return store_uds_negative(SID_REQUEST_TRANSFER_EXIT, NRC::GeneralProgrammingFailure);
     }
-    info!("OTA: slot config → slot {}", if other_slot == 0 { "A" } else { "B" });
+    info!("OTA: SWAP_MAGIC set → will swap on reset");
 
     // Mark done; arm the reset.
     OTA_STATE.store(OtaState::Done as u8, Ordering::Relaxed);
@@ -518,6 +474,14 @@ fn crc32_update(crc: u32, byte: u8) -> u32 {
         c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
     }
     c
+}
+
+unsafe fn write_swap_magic() -> Result<(), flash::FlashError> {
+    // Erase the STATE page (2 KB) then write SWAP_MAGIC (0xF0) as the
+    // first byte. embassy-boot reads this on boot and swaps DFU→ACTIVE.
+    let page_start = STATE_ADDR & !(2047u32);
+    flash::erase_region(page_start, page_start + 2048)?;
+    flash::write_u64(STATE_ADDR, page_start, page_start + 2048, SWAP_MAGIC as u64)
 }
 
 
