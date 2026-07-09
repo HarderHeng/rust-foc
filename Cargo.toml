@@ -1,5 +1,5 @@
 [workspace]
-members = ["common", "foc-algo", "uds-core"]
+members = ["common", "foc-algo", "uds-core", "shared", "bootloader"]
 resolver = "2"
 
 [package]
@@ -7,47 +7,26 @@ name = "foc-rust"
 version = "0.1.0"
 edition = "2021"
 authors = ["heng"]
-description = "Field Oriented Control firmware in Rust on B-G431B-ESC1"
+description = "FOC firmware — dual-slot, bootloader + app"
 
 [dependencies]
+foc-shared = { path = "shared" }
 foc-common = { path = "common" }
 foc-algo = { path = "foc-algo" }
 uds-core = { path = "uds-core", default-features = false }
-embassy-stm32 = { version = "0.6", features = ["stm32g431cb", "defmt", "time-driver-any", "unstable-pac", "memory-x"] }
+embassy-stm32 = { version = "0.6", features = ["stm32g431cb", "defmt", "time-driver-any", "unstable-pac"] }
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
-
-# 1 MHz tick rate so `Duration::from_micros(100)` is exactly
-# 100 ticks (no rounding to 3 ticks ≈ 91.5 µs as we'd get at
-# 32 768 Hz). The motor task's 10 kHz cadence stays exactly
-# 10 kHz instead of drifting to 10.93 kHz.
 embassy-time = { version = "0.5", features = ["defmt", "tick-hz-1_000_000"] }
 embassy-futures = "0.1"
 embassy-sync = "0.8"
 embedded-io = "0.7"
 embedded-io-async = "0.7"
-# `embedded_can` is the type-level surface (Id::Standard / Id::Extended
-# enum) used by the embassy CAN frame API. We pin to 0.4.1 to match
-# the version embassy-stm32 0.6 brings in transitively; using a
-# different version here causes "multiple different versions" errors
-# when matching on `frame.header().id()`.
 embedded-can = "0.4.1"
-
 defmt = "0.3"
 defmt-rtt = "0.4"
-
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
-# `critical-section` is the trait crate; the single-core impl
-# is provided by `cortex-m`'s `critical-section-single-core`
-# feature above (the two features share the same name, but
-# they're on different crates and have different semantics).
 critical-section = "1.1"
 cortex-m-rt = "0.7"
-
-# Shell uses a minimal byte-at-a-time parser (no embedded-cli, no
-# core::fmt) to keep flash under 60 KB. The parser lives in
-# src/shell/commands.rs.
-
-# AES-128 for UDS SecurityAccess seed-key derivation.
 aes = "0.8"
 
 [profile.release]
@@ -61,12 +40,3 @@ panic = "abort"
 [profile.dev]
 debug = 2
 opt-level = "s"
-
-# Host-side test harness for UDS unit tests is deferred to a
-# follow-up commit. Setting up a separate `x86_64-unknown-linux-gnu`
-# target requires `rustup target add` and an external toolchain
-# — out of scope for the firmware. For now, the LFSR algorithm
-# is covered by the Python smoke test
-# `scripts/smoke_test.py::s_uds_lfsr_key_known`, which computes
-# the same key the firmware should produce and asserts equality
-# against a known reference vector (0x497DFE82).

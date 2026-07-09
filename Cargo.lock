@@ -89,6 +89,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootloader"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "foc-shared",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -636,8 +645,13 @@ dependencies = [
  "embedded-io-async 0.7.0",
  "foc-algo",
  "foc-common",
+ "foc-shared",
  "uds-core",
 ]
+
+[[package]]
+name = "foc-shared"
+version = "0.1.0"
 
 [[package]]
 name = "futures-core"

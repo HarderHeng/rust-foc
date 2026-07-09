@@ -33,6 +33,10 @@ async fn main(spawner: Spawner) {
     let handles = bsp::board_init(p);
     info!("board_init done; USART2 ringbuffer ready");
 
+    // Start IWDG early — bootloader's failover counter increments on
+    // watchdog reset, so we must feed before the first timeout (~125 ms).
+    feed_watchdog();
+
     // Log firmware metadata if a valid block was injected into flash.
     if let Some(meta) = metadata::read() {
         let version_str = core::str::from_utf8(&meta.version).unwrap_or("?");
@@ -81,5 +85,18 @@ async fn main(spawner: Spawner) {
     // Main task: park in WFI forever. Real work happens in spawned tasks.
     loop {
         cortex_m::asm::wfi();
+    }
+}
+
+fn feed_watchdog() {
+    unsafe {
+        const KR: u32 = 0x4000_3000;
+        const PR: u32 = 0x4000_3004;
+        const RLR: u32 = 0x4000_3008;
+        core::ptr::write_volatile(KR as *mut u32, 0x5555);
+        core::ptr::write_volatile(PR as *mut u32, 6);       // /256
+        core::ptr::write_volatile(RLR as *mut u32, 0xFFF);  // ~125 ms
+        core::ptr::write_volatile(KR as *mut u32, 0xCCCC);  // start
+        core::ptr::write_volatile(KR as *mut u32, 0xAAAA);  // refresh
     }
 }

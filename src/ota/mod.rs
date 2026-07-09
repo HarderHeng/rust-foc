@@ -43,6 +43,7 @@ use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use critical_section::Mutex;
 use defmt::{info, warn};
+use foc_shared;
 
 
 // ---- UDS service IDs (subset) -----------------------------------------
@@ -110,6 +111,9 @@ static NEXT_BLOCK_SEQ: AtomicU8 = AtomicU8::new(1);
 static OTA_BUFFER: Mutex<RefCell<([u8; 8], u8)>> =
     Mutex::new(RefCell::new(([0xFF; 8], 0)));
 
+static OTA_TARGET_START: AtomicU32 = AtomicU32::new(0);
+static OTA_TARGET_END: AtomicU32 = AtomicU32::new(0);
+
 // ---- Public surface (called from src/can/uds.rs) ----------------------
 
 /// True iff the canopen task should perform an NVIC system
@@ -135,9 +139,9 @@ pub fn handle_request_download(payload: &[u8]) -> usize {
     }
     let size = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]) as usize;
 
-    // Bound check against the app region.
-    let app_size = (flash::APP_END - flash::APP_START) as usize;
-    if size == 0 || size > app_size {
+    // Target the OTHER slot.
+    let (target_start, target_end) = flash::other_slot_range();
+    if size == 0 || size > (target_end - target_start) as usize {
         return store_uds_negative(SID_REQUEST_DOWNLOAD, NRC::RequestOutOfRange);
     }
 
@@ -149,8 +153,8 @@ pub fn handle_request_download(payload: &[u8]) -> usize {
 
     // Erase the app region. 124 KB / 2 KB = 62 pages; each
     // erase is a few ms. Total ~50–100 ms.
-    info!("OTA: erasing app region ({} bytes image)", size);
-    if let Err(_e) = unsafe { flash::erase_app_region() } {
+    info!("OTA: erasing target slot ({} bytes)", size);
+    if let Err(_e) = unsafe { flash::erase_region(target_start, target_end) } {
         warn!("OTA: erase failed");
         return store_uds_negative(SID_REQUEST_DOWNLOAD, NRC::GeneralProgrammingFailure);
     }
@@ -159,7 +163,9 @@ pub fn handle_request_download(payload: &[u8]) -> usize {
     OTA_STATE.store(OtaState::Receiving as u8, Ordering::Relaxed);
     OTA_TOTAL_SIZE.store(size as u32, Ordering::Relaxed);
     OTA_REMAINING.store(size as u32, Ordering::Relaxed);
-    OTA_NEXT_OFFSET.store(flash::APP_START, Ordering::Relaxed);
+    OTA_NEXT_OFFSET.store(target_start, Ordering::Relaxed);
+    OTA_TARGET_START.store(target_start, Ordering::Relaxed);
+    OTA_TARGET_END.store(target_end, Ordering::Relaxed);
     OTA_CRC32.store(0xFFFF_FFFF, Ordering::Relaxed);
     NEXT_BLOCK_SEQ.store(1, Ordering::Relaxed);
     critical_section::with(|cs| {
@@ -242,7 +248,7 @@ pub fn handle_transfer_data(payload: &[u8]) -> usize {
         }
         if *len == 8 {
             let word = u64::from_le_bytes(*buf);
-            if unsafe { flash::write_u64(next_offset, word) }.is_err() {
+            if unsafe { flash::write_u64(next_offset, OTA_TARGET_START.load(Ordering::Relaxed), OTA_TARGET_END.load(Ordering::Relaxed), word) }.is_err() {
                 flush_error = Some(NRC::GeneralProgrammingFailure);
             } else {
                 next_offset += 8;
@@ -304,7 +310,7 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
         let (buf, len) = &mut *OTA_BUFFER.borrow_ref_mut(cs);
         if *len > 0 {
             let word = u64::from_le_bytes(*buf);
-            if unsafe { flash::write_u64(next_offset, word) }.is_err() {
+            if unsafe { flash::write_u64(next_offset, OTA_TARGET_START.load(Ordering::Relaxed), OTA_TARGET_END.load(Ordering::Relaxed), word) }.is_err() {
                 flush_error = Some(NRC::GeneralProgrammingFailure);
             } else {
                 // Successful flush — no need to bump next_offset
@@ -403,7 +409,7 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
     };
 
     if unsafe {
-        flash::write_metadata(flash::METADATA_MAGIC, image_size, crc, &version, build_ts)
+        flash::write_metadata(flash::other_metadata_addr(), flash::METADATA_MAGIC, image_size, crc, &version, build_ts)
     }
     .is_err()
     {
@@ -414,6 +420,19 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
             NRC::GeneralProgrammingFailure,
         );
     }
+
+    // Switch SlotConfig so bootloader boots the other slot.
+    let other_slot = (flash::current_slot() ^ 1) as u8;
+    let cfg = foc_shared::SlotConfig {
+        magic: foc_shared::SLOT_CONFIG_MAGIC, active_slot: other_slot,
+        boot_attempts: 0, flags: 0,
+    };
+    if let Err(_) = unsafe { flash::write_slot_config(cfg.to_u64()) } {
+        warn!("OTA: slot config write failed");
+        OTA_STATE.store(OtaState::Idle as u8, Ordering::Relaxed);
+        return store_uds_negative(SID_REQUEST_TRANSFER_EXIT, NRC::GeneralProgrammingFailure);
+    }
+    info!("OTA: slot config → slot {}", if other_slot == 0 { "A" } else { "B" });
 
     // Mark done; arm the reset.
     OTA_STATE.store(OtaState::Done as u8, Ordering::Relaxed);
