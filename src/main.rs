@@ -39,6 +39,12 @@ async fn main(spawner: Spawner) {
     // Log firmware identity.
     info!("Firmware: {} (git {})", env!("FOC_VERSION"), env!("FOC_GIT_SHA"));
 
+    // Confirm boot to embassy-boot: after a DFU→ACTIVE swap, the bootloader
+    // sets REVERT_MAGIC (0xC0) in the STATE partition. We write BOOT_MAGIC
+    // (0xD0) to confirm the new firmware works. Without this, the next reset
+    // would swap back to the old firmware.
+    mark_booted();
+
     let BoardHandles { debug_uart, motor_pwm, can } = handles;
 
     // Split the BufferedUart into TX / RX halves so the shell task
@@ -88,5 +94,18 @@ fn feed_watchdog() {
         core::ptr::write_volatile(RLR as *mut u32, 0xFFF);  // ~125 ms
         core::ptr::write_volatile(KR as *mut u32, 0xCCCC);  // start
         core::ptr::write_volatile(KR as *mut u32, 0xAAAA);  // refresh
+    }
+}
+
+fn mark_booted() {
+    // Write BOOT_MAGIC (0xD0) to STATE partition to confirm successful boot.
+    // After embassy-boot swaps DFU→ACTIVE, it leaves REVERT_MAGIC (0xC0).
+    // Changing it to BOOT_MAGIC prevents the swap from being reverted.
+    const STATE_ADDR: u32 = 0x0800_6000;
+    const BOOT_MAGIC: u8 = 0xD0;
+    unsafe {
+        let page = STATE_ADDR & !2047;
+        let _ = crate::drivers::flash::erase_region(page, page + 2048);
+        let _ = crate::drivers::flash::write_u64(STATE_ADDR, page, page + 2048, BOOT_MAGIC as u64);
     }
 }

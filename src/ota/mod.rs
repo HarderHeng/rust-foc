@@ -459,15 +459,8 @@ fn store_uds_negative(sid: u8, nrc: NRC) -> usize {
     uds_core::state::store_response(&[0x7F, sid, nrc as u8])
 }
 
-/// Standard CRC-32/ISO-HDLC (poly 0x04C1_1DB7), one byte at
-/// a time. Table-less so we don't need 1 KB of const data.
-///
-/// Lives in `.data` (RAM) — called from `handle_transfer_data` per
-/// byte of incoming image data. The function is small but on the
-/// OTA hot path; RAM-residency keeps the closure uniform with the
-/// rest of the OTA code.
+/// Standard CRC-32/ISO-HDLC (poly 0x04C1_1DB7), one byte at a time.
 #[inline(never)]
-#[link_section = ".data"]
 fn crc32_update(crc: u32, byte: u8) -> u32 {
     let mut c = crc ^ byte as u32;
     for _ in 0..8 {
