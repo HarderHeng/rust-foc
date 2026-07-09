@@ -51,7 +51,6 @@ impl<U: embedded_io::Write> embedded_io::Write for Uart2Sink<U> {
 // type to cross the boundary; the actual writer is the local
 // `TxWriter06` adapter in tasks/shell.rs.
 
-use core::fmt;
 use embassy_stm32::usart::Error as UsartError;
 use embedded_io_06 as eio06;
 
@@ -68,11 +67,5 @@ impl eio06::Error for UsartError06 {
 impl From<UsartError> for UsartError06 {
     fn from(e: UsartError) -> Self {
         UsartError06(e)
-    }
-}
-
-impl fmt::Display for UsartError06 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
     }
 }

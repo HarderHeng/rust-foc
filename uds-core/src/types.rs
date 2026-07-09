@@ -5,8 +5,6 @@
 //! response codes (`Nrc`) live here too — they're protocol
 //! values, not engine state.
 
-use core::fmt;
-
 // ---- Session (0x10) ----
 
 #[repr(u8)]
@@ -101,41 +99,5 @@ impl Nrc {
     /// Standard negative response: `[0x7F, sid, nrc]`.
     pub const fn negative_response(self, sid: u8) -> [u8; 3] {
         [0x7F, sid, self.code()]
-    }
-}
-
-impl fmt::Display for Nrc {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::GeneralReject => "generalReject",
-            Self::ServiceNotSupported => "serviceNotSupported",
-            Self::SubFunctionNotSupported => "subFunctionNotSupported",
-            Self::IncorrectMessageLengthOrInvalidFormat
-                => "incorrectMessageLengthOrInvalidFormat",
-            Self::ResponseTooLong => "responseTooLong",
-            Self::BusyRepeatRequest => "busyRepeatRequest",
-            Self::ConditionsNotCorrect => "conditionsNotCorrect",
-            Self::RequestSequenceError => "requestSequenceError",
-            Self::NoResponseFromSubnetComponent => "noResponseFromSubnetComponent",
-            Self::FailurePreventsExecutionOfRequestedAction
-                => "failurePreventsExecutionOfRequestedAction",
-            Self::RequestOutOfRange => "requestOutOfRange",
-            Self::SecurityAccessDenied => "securityAccessDenied",
-            Self::AuthenticationRequired => "authenticationRequired",
-            Self::InvalidKey => "invalidKey",
-            Self::ExceededNumberOfAttempts => "exceededNumberOfAttempts",
-            Self::RequiredTimeDelayNotExpired => "requiredTimeDelayNotExpired",
-            Self::UploadDownloadNotAccepted => "uploadDownloadNotAccepted",
-            Self::TransferDataSuspended => "transferDataSuspended",
-            Self::GeneralProgrammingFailure => "generalProgrammingFailure",
-            Self::WrongBlockSequenceNumber => "wrongBlockSequenceNumber",
-            Self::IllegalByteCountInBlockTransfer => "illegalByteCountInBlockTransfer",
-            Self::RequestCorrectlyReceivedResponsePending
-                => "requestCorrectlyReceivedResponsePending",
-            Self::SubFunctionNotSupportedInActiveSession
-                => "subFunctionNotSupportedInActiveSession",
-            Self::ServiceNotSupportedInActiveSession
-                => "serviceNotSupportedInActiveSession",
-        })
     }
 }

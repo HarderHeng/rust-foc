@@ -11,7 +11,6 @@
 
 use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
 use aes::Aes128;
-use core::fmt;
 
 /// AES-128 key / seed / derived key size (16 bytes).
 pub const AES_BLOCK_SIZE: usize = 16;
@@ -45,15 +44,6 @@ impl AesBlock {
 
 impl From<[u8; AES_BLOCK_SIZE]> for AesBlock {
     fn from(b: [u8; AES_BLOCK_SIZE]) -> Self { Self(b) }
-}
-
-impl fmt::Debug for AesBlock {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in &self.0 {
-            write!(f, "{:02x}", byte)?;
-        }
-        Ok(())
-    }
 }
 
 /// Derive a 16-byte key from a 16-byte seed and 16-byte key material.
