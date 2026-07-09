@@ -15,6 +15,10 @@ target/
 .DS_Store
 Thumbs.db
 
+# AI/Agent tooling
+.omo/
+.superpowers/
+
 # Python
 __pycache__/
 *.pyc

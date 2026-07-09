@@ -1,8 +1,8 @@
 //! CLI shell over USART2 (debug UART).
 //!
 //! Two submodules:
-//! - `commands` — embedded-cli command enum + handler implementations
-//! - `task`     — async task that owns the UART and drives the CLI
+//! - `commands` — command parser + executors
+//! - `task`     — async task that owns the UART and drives the shell
 
 pub mod commands;
 pub mod task;

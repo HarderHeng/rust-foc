@@ -83,7 +83,6 @@ pub enum FlashError {
 /// path is in RAM, so we never have to reason about whether a
 /// given helper's address is "still ahead of the write pointer".
 #[inline(never)]
-#[link_section = ".data"]
 fn page_of(offset: u32) -> u32 {
     (offset - FLASH_BASE) / ERASE_SIZE
 }
@@ -97,8 +96,6 @@ fn page_of(offset: u32) -> u32 {
 /// and the call into a flash-resident helper after the erase
 /// pointer has crossed that helper's address would crash. See
 /// the module-level docs in `src/can/ota.rs` for the rationale.
-#[inline(never)]
-#[link_section = ".data"]
 pub unsafe fn erase_app_region() -> Result<(), FlashError> {
     unlock_sequence();
     let flash = pac::FLASH;
@@ -130,8 +127,6 @@ pub unsafe fn erase_app_region() -> Result<(), FlashError> {
 /// Lives in `.data` (RAM) — this is the hot path during OTA and
 /// must not be running from flash while we're writing flash.
 /// See the module-level docs in `src/can/ota.rs` for the rationale.
-#[inline(never)]
-#[link_section = ".data"]
 pub unsafe fn write_u64(offset: u32, value: u64) -> Result<(), FlashError> {
     if offset % WRITE_SIZE != 0 {
         return Err(FlashError::Unaligned);
@@ -193,7 +188,6 @@ pub fn read_u32(offset: u32) -> u32 {
 ///
 /// Lives in `.data` (RAM) — same reason as `write_u64`.
 #[inline(never)]
-#[link_section = ".data"]
 pub unsafe fn write_metadata(
     magic: u32,
     image_size: u32,
@@ -255,7 +249,6 @@ pub unsafe fn write_metadata(
 /// Lives in `.data` (RAM) — see `write_u64`'s docs for the
 /// rationale (same as the rest of the OTA path).
 #[inline(never)]
-#[link_section = ".data"]
 unsafe fn unlock_sequence() {
     let flash = pac::FLASH;
     while flash.sr().read().bsy() {}
@@ -266,7 +259,6 @@ unsafe fn unlock_sequence() {
 /// Lock the flash controller. Always called from RAM-resident
 /// OTA code, so lives in `.data`.
 #[inline(never)]
-#[link_section = ".data"]
 unsafe fn lock() {
     pac::FLASH.cr().modify(|w| w.set_lock(true));
 }
@@ -274,13 +266,11 @@ unsafe fn lock() {
 /// Wait until the flash controller reports !bsy. Always called
 /// from RAM-resident OTA code, so lives in `.data`.
 #[inline(never)]
-#[link_section = ".data"]
 unsafe fn wait_busy() {
     while pac::FLASH.sr().read().bsy() {}
 }
 
 #[inline(never)]
-#[link_section = ".data"]
 unsafe fn check_and_clear_errors() -> Result<(), FlashError> {
     let sr = pac::FLASH.sr().read();
     if sr.progerr() || sr.wrperr() || sr.pgaerr() || sr.sizerr() || sr.pgserr() {

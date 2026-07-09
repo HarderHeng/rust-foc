@@ -188,7 +188,6 @@ pub fn build_heartbeat_frame(state: NmtState) -> Frame {
 /// master would lose the ability to deliver TransferData frames
 /// mid-transfer.
 #[embassy_executor::task]
-#[link_section = ".data"]
 pub async fn canopen_task(can: &'static mut Can<'static>, transport: &'static dyn UdsTransport) {
     info!("CANopen: node {} starting", NODE_ID);
 

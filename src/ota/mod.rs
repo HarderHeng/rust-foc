@@ -126,7 +126,6 @@ pub fn take_reset_request() -> bool {
 /// out of flash that the controller is about to clobber is the
 /// hazard this whole arrangement exists to prevent.
 #[inline(never)]
-#[link_section = ".data"]
 pub fn handle_request_download(payload: &[u8]) -> usize {
     // Request: [0x00, size_lo, size_hi, size_hi2, size_hi3]
     // (dataFormatIdentifier=0x00 = no compression; 4-byte size
@@ -185,7 +184,6 @@ pub fn handle_request_download(payload: &[u8]) -> usize {
 /// alive, but the moment a write reaches the cache line containing
 /// our PC the controller would execute garbage.
 #[inline(never)]
-#[link_section = ".data"]
 pub fn handle_transfer_data(payload: &[u8]) -> usize {
     if OtaState::from_u8(OTA_STATE.load(Ordering::Relaxed)) != OtaState::Receiving {
         return store_uds_negative(SID_TRANSFER_DATA, NRC::ConditionsNotCorrect);
@@ -282,7 +280,6 @@ pub fn handle_transfer_data(payload: &[u8]) -> usize {
 /// `flash::write_u64` (the trailing flush) on the OTA path, so
 /// must be running from RAM by the time we get here.
 #[inline(never)]
-#[link_section = ".data"]
 pub fn handle_transfer_exit(payload: &[u8]) -> usize {
     if OtaState::from_u8(OTA_STATE.load(Ordering::Relaxed)) != OtaState::Receiving {
         return store_uds_negative(
@@ -452,14 +449,12 @@ enum NRC {
 /// Lives in `.data` (RAM) — called from the OTA handlers which
 /// are themselves RAM-resident, so the call chain stays uniform.
 #[inline(never)]
-#[link_section = ".data"]
 fn store_uds_positive(payload: &[u8]) -> usize {
     uds_core::state::store_response(payload)
 }
 
 /// Same but for negative responses (`[0x7F, SID, NRC]`).
 #[inline(never)]
-#[link_section = ".data"]
 fn store_uds_negative(sid: u8, nrc: NRC) -> usize {
     uds_core::state::store_response(&[0x7F, sid, nrc as u8])
 }

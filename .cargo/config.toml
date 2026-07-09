@@ -5,4 +5,4 @@ target = "thumbv7em-none-eabihf"
 runner = "probe-rs run --chip STM32G431CBUx"
 
 [env]
-DEFMT_LOG = "trace"
+DEFMT_LOG = "warn"

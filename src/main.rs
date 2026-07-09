@@ -13,13 +13,17 @@ mod uds;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_stm32::usart::BufferedUart;
-use panic_probe as _;
 
 use crate::bsp::BoardHandles;
 
 // Linker retention (required — do not remove)
 use defmt_rtt as _;
 use embassy_stm32::pac as _;
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    cortex_m::asm::udf()
+}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
