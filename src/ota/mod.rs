@@ -378,6 +378,31 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
         image_size, crc
     );
 
+    // CRC32 flash verification — read back every byte from the target
+    // slot and compare against the running CRC. If flash cells didn't
+    // program correctly (marginal voltage, worn page), this catches it
+    // before we commit the slot switch.
+    info!("OTA: verifying flash CRC32...");
+    {
+        let target_start = OTA_TARGET_START.load(Ordering::Relaxed);
+        let mut verify_crc: u32 = 0xFFFF_FFFF;
+        for offset in (0..image_size).step_by(4) {
+            let word = unsafe { flash::read_u32(target_start + offset) };
+            let bytes = word.to_le_bytes();
+            let take = ((image_size - offset) as usize).min(4);
+            for &b in &bytes[..take] {
+                verify_crc = crc32_update(verify_crc, b);
+            }
+        }
+        verify_crc ^= 0xFFFF_FFFF;
+        if verify_crc != crc {
+            warn!("OTA: flash CRC mismatch (expected 0x{:08x}, got 0x{:08x})", crc, verify_crc);
+            OTA_STATE.store(OtaState::Idle as u8, Ordering::Relaxed);
+            return store_uds_negative(SID_REQUEST_TRANSFER_EXIT, NRC::GeneralProgrammingFailure);
+        }
+        info!("OTA: flash CRC OK");
+    }
+
     // Write the metadata block. We persist the full 32-byte
     // struct: magic, image_size, image_crc, the build-time
     // version string, and the build timestamp. The build.rs
