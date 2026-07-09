@@ -73,8 +73,9 @@ pub trait UdsTransport {
     /// Handle one received UDS request frame. The frame must
     /// pass `is_uds_frame` (checked by the caller). Builds the
     /// UDS request slice, runs the dispatcher, and returns the
-    /// response frame.
-    fn handle_rx_frame(&self, frame: &FdFrame) -> Option<FdFrame>;
+    /// response frame. `now_ms` is the current timestamp for
+    /// P2/P2* timeout tracking.
+    fn handle_rx_frame(&self, frame: &FdFrame, now_ms: u32) -> Option<FdFrame>;
 }
 
 pub struct DefaultUdsTransport;
@@ -88,7 +89,7 @@ impl UdsTransport for DefaultUdsTransport {
         is_uds_request_id(id)
     }
 
-    fn handle_rx_frame(&self, frame: &FdFrame) -> Option<FdFrame> {
+    fn handle_rx_frame(&self, frame: &FdFrame, now_ms: u32) -> Option<FdFrame> {
         let id = match frame.header().id() {
             Id::Standard(s) => s.as_raw(),
             Id::Extended(_) => return None,
@@ -109,7 +110,7 @@ impl UdsTransport for DefaultUdsTransport {
         {
             return None;
         }
-        uds::dispatch(request);
+        uds::dispatch(request, now_ms);
         build_response_frame(id)
     }
 }

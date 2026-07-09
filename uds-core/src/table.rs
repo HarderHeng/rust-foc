@@ -150,8 +150,10 @@ pub struct UdsConfig {
     pub sa_max_attempts: u8,
 
     /// Per-SAL AES-128 key material. Index 0/1/2 = SAL1/2/3.
-    /// Writable at runtime via DID 0xF180.
-    pub key_masks: [AesBlock; 3],
+    /// Writable at runtime via DID 0xF180. Uses `Cell` for
+    /// interior mutability to avoid `&mut` aliasing UB when
+    /// `write_key_masks` is called from within `dispatch_sid`.
+    pub key_masks: core::cell::Cell<[AesBlock; 3]>,
 
     /// Session-change callbacks. The runtime registers these
     /// in the platform's config; `fn` pointer (no capture) is fine
@@ -615,12 +617,16 @@ impl UdsConfig {
     /// security, copy the request into `state.request_buf`, and call
     /// the matching `dispatch_0xNN` method.
     ///
+    /// `now_ms` is the current timestamp in milliseconds, used to
+    /// stamp `request_tick_ms` for P2/P2* timeout tracking.
+    ///
     /// This is the single entry point for the platform's transport
     /// adapter — see `src/uds/mod.rs` in the foc-rust project.
-    pub fn dispatch_sid(&mut self, state: &mut UdsState, request: &[u8]) {
+    pub fn dispatch_sid(&mut self, state: &mut UdsState, request: &[u8], now_ms: u32) {
         if request.is_empty() {
             return;
         }
+        state.request_tick_ms = now_ms;
         let sid = request[0];
         let entry = match self.services.iter().find(|e| e.sid == sid) {
             Some(e) => e,
@@ -782,9 +788,9 @@ fn sa_send_key(state: &mut UdsState, config: &UdsConfig, sal: u8,
     let mut rx_key = [0u8; 16];
     rx_key.copy_from_slice(&req[2..18]);
     let expected = if let Some(f) = config.key_fn {
-        f(&AesBlock(state.current_seed), &config.key_masks[(sal - 1) as usize])
+        f(&AesBlock(state.current_seed), &config.key_masks.get()[(sal - 1) as usize])
     } else {
-        generate_key(&AesBlock(state.current_seed), &config.key_masks[(sal - 1) as usize])
+        generate_key(&AesBlock(state.current_seed), &config.key_masks.get()[(sal - 1) as usize])
     };
     if !bool::from(rx_key.ct_eq(&expected.0)) {
         state.sa_fail_count = state.sa_fail_count.saturating_add(1);

@@ -27,6 +27,19 @@ pub fn tx_disabled() -> bool {
     unsafe { (&*(&raw const UDS_STATE)).tx_disabled }
 }
 
+/// Public helper: check and clear the `response_pending` flag.
+/// Returns `true` if a pending-queue job completed and stored
+/// a response that should be transmitted.
+pub fn take_response_pending() -> bool {
+    let state = unsafe { &mut *(&raw const UDS_STATE as *mut UdsState) };
+    if state.response_pending {
+        state.response_pending = false;
+        true
+    } else {
+        false
+    }
+}
+
 /// Public helper: drive the pending queue. Called by
 /// canopen_task every tick. `now_ms` is the current
 /// millisecond clock.
@@ -40,6 +53,9 @@ pub fn tick(now_ms: u32) {
 /// response is stored in the shared buffer; the caller reads
 /// it via `uds_core::load_response()` after the dispatch returns.
 ///
+/// `now_ms` is the current timestamp in milliseconds, used to
+/// stamp `request_tick_ms` for P2/P2* timeout tracking.
+///
 /// This is the sole public entry point into the UDS engine.
 /// The transport adapter (e.g. `src/can/uds_bridge.rs`) calls
 /// this with the decoded payload.
@@ -47,8 +63,8 @@ pub fn tick(now_ms: u32) {
 /// The actual routing logic lives in `UdsConfig::dispatch_sid()`
 /// inside the `uds-core` crate — this function only acquires
 /// the two static references and delegates.
-pub fn dispatch(request: &[u8]) {
+pub fn dispatch(request: &[u8], now_ms: u32) {
     let state = unsafe { &mut *(&raw const UDS_STATE as *mut UdsState) };
     let config = unsafe { &mut *(&raw const static_config::UDS_CONFIG as *mut UdsConfig) };
-    config.dispatch_sid(state, request);
+    config.dispatch_sid(state, request, now_ms);
 }

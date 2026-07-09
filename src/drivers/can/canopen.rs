@@ -237,7 +237,26 @@ pub async fn canopen_task(can: &'static mut Can<'static>, transport: &'static dy
         // continuations and pushes a 0x78 ResponsePending frame
         // if the request has been pending longer than P2.
         // No-op in Phase 5c (no jobs pushed yet).
-        crate::uds::tick(embassy_time::Instant::now().elapsed().as_millis() as u32);
+        let now_ms = embassy_time::Instant::now().as_millis() as u32;
+        crate::uds::tick(now_ms);
+
+        // If the pending queue completed a job, transmit the
+        // response that the pending closure stored.
+        if crate::uds::take_response_pending() {
+            let (bytes, len) = uds_core::state::load_response();
+            if len > 0 {
+                let resp_frame = embassy_stm32::can::frame::FdFrame::new_standard(
+                    crate::drivers::can::uds_bridge::COB_ID_PHYSICAL_RESPONSE,
+                    &bytes[..len as usize],
+                );
+                if let Ok(frame) = resp_frame {
+                    let _ = embassy_time::with_timeout(
+                        embassy_time::Duration::from_millis(10),
+                        can.write_fd(&frame),
+                    ).await;
+                }
+            }
+        }
 
         // Race the heartbeat tick against the next received
         // frame. If a frame arrives, process it (NMT or UDS).
@@ -290,7 +309,7 @@ pub async fn canopen_task(can: &'static mut Can<'static>, transport: &'static dy
                     // (up to 64 bytes) so a single frame covers
                     // even the long services (0x34 RequestDownload
                     // = 11 bytes, 0x19 ReadDTC with many DTCs).
-                    if let Some(response) = transport.handle_rx_frame(&frame) {
+                    if let Some(response) = transport.handle_rx_frame(&frame, now_ms) {
                         // Wrap the TX in a timeout. If FDCAN1 enters
                         // bus-off (wiring fault, error storm), the
                         // embassy write future can pend indefinitely;

@@ -78,12 +78,11 @@ fn write_key_masks(data: &[u8]) -> Result<(), Nrc> {
         AesBlock(raw[1]),
         AesBlock(raw[2]),
     ];
-    // Safety: single-threaded executor; called from dispatch which
-    // is the sole owner of the UDS_CONFIG static.
+    // Safety: single-threaded executor; Cell::set avoids the
+    // &mut aliasing UB that the previous raw-pointer cast had.
     unsafe {
-        let cfg = &mut *(&raw mut crate::uds::static_config::UDS_CONFIG
-                         as *mut uds_core::table::UdsConfig);
-        cfg.key_masks = masks;
+        let cfg = &*(&raw const crate::uds::static_config::UDS_CONFIG);
+        cfg.key_masks.set(masks);
     }
     defmt::info!("UDS: key_masks updated via DID 0xF180");
     Ok(())
@@ -208,7 +207,7 @@ pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
     p2_server_ms: 50,
     request_timeout_ms: 5000,
     sa_max_attempts: 3,
-    key_masks: [
+    key_masks: core::cell::Cell::new([
         AesBlock::from_bytes([
             0x30, 0x00, 0x22, 0x12, 0xAB, 0xCD, 0xEF, 0x01,
             0x23, 0x45, 0x67, 0x89, 0x01, 0x23, 0x45, 0x67,
@@ -221,7 +220,7 @@ pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
             0xA5, 0xC3, 0xF1, 0x1B, 0xCA, 0xFE, 0xBA, 0xBE,
             0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12,
         ]),
-    ],
+    ]),
     on_default_session_enter: None,
     on_programming_session_enter: None,
     on_extended_session_enter: None,

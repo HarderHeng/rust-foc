@@ -238,6 +238,9 @@ impl SmoObserver {
 
         // Current observer dynamics (Euler integration):
         // dî/dt = (v − Rs·î + z) / Ls
+        if self.cfg.ls <= 0.0 {
+            return;
+        }
         let inv_ls = 1.0 / self.cfg.ls;
         self.i_alpha_hat += (v_alpha - self.cfg.rs * self.i_alpha_hat + z_alpha) * inv_ls * dt;
         self.i_beta_hat  += (v_beta  - self.cfg.rs * self.i_beta_hat  + z_beta)  * inv_ls * dt;
