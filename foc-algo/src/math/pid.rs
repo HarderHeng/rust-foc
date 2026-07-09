@@ -7,7 +7,8 @@
 //! ```
 
 /// PID controller state.  All fields are public — caller reads/writes directly.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Pid {
     /// Proportional gain.
     pub kp: f32,

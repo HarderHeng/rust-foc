@@ -9,7 +9,8 @@
 use crate::math::transforms::HALF_SQRT3;
 
 /// Three-phase duty cycles in [0, 1].
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Duty {
     pub ta: f32,
     pub tb: f32,

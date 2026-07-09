@@ -39,7 +39,8 @@ impl Trig for LibmTrig {
 }
 
 /// Three-phase quantities (a, b, c).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Abc {
     pub a: f32,
     pub b: f32,
@@ -47,14 +48,16 @@ pub struct Abc {
 }
 
 /// Stationary αβ frame.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct AlphaBeta {
     pub alpha: f32,
     pub beta: f32,
 }
 
 /// Rotating dq frame (synchronised with the rotor).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Dq {
     pub d: f32,
     pub q: f32,

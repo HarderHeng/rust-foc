@@ -60,7 +60,7 @@ pub const METADATA_ADDR: u32 = 0x0801_F800;
 /// this). Writer side defines the layout the reader side validates.
 pub const METADATA_MAGIC: u32 = 0xF0C1_001A;
 
-#[derive(Debug)]
+#[derive(defmt::Format)]
 pub enum FlashError {
     Unaligned,
     OutOfBounds,

@@ -26,7 +26,8 @@ use crate::math::{circle_limitation, decoupling_voltage, Duty, Pid, Ramp, Trig};
 use crate::motor::MotorParams;
 use crate::state::{ControllerState, Meas, Target};
 
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Mode { #[default] Off, Torque, Speed, Position }
 
 pub struct FocController {

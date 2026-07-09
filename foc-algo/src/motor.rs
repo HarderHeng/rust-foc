@@ -35,7 +35,8 @@ use core::f32::consts::PI;
 ///
 /// All values in SI units unless noted otherwise.  Fill in once, then use
 /// the methods to derive PI gains, torque references, and observer gains.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct MotorParams {
     /// Phase resistance (Ω).  Must be > 0.
     pub r: f32,

@@ -29,7 +29,7 @@ pub use crate::drivers::flash::METADATA_MAGIC;
 /// reads at offsets 12 and 20 (not 8-aligned), which would hard-
 /// fault on Cortex-M targets with `UNALIGN_TRP = 1`.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(defmt::Format, Clone, Copy)]
 pub struct Metadata {
     pub magic: u32,
     pub image_size: u32,

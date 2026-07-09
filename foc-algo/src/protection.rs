@@ -165,7 +165,8 @@ impl I2tLimiter {
 /// expected to call `check()` exactly once per control cycle and act on
 /// the result before driving the PWM.  Use [`I2tLimiter`] for thermal
 /// integration; this is purely an instantaneous hardware-protection trip.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct InstantOvercurrent {
     threshold_a: f32,
 }
@@ -189,7 +190,8 @@ impl InstantOvercurrent {
 /// DC bus voltage window monitor.  Returns an error when vdc falls outside
 /// `[vdc_min, vdc_max]`.  Useful as a per-cycle sanity check on the ADC
 /// reading (overvoltage → regen cap failure; undervoltage → brownout).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct BusVoltageMonitor {
     vdc_min: f32,
     vdc_max: f32,
@@ -230,7 +232,8 @@ impl BusVoltageMonitor {
 /// becomes active for as long as it remains armed.  Call
 /// [`disarm`](Self::disarm) when Iq returns to zero or the controller
 /// leaves the active mode.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct StallDetector {
     /// Speed magnitude below which we consider the rotor stalled (rad/s).
     pub min_speed_rad_s: f32,

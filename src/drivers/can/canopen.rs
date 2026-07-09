@@ -92,7 +92,7 @@ pub const HEARTBEAT_COB_ID: u16 = 0x700 + NODE_ID as u16;
 pub const NMT_COB_ID: u16 = 0x000;
 
 /// NMT state. CiA 301 §3.3.2 maps each state to a heartbeat byte.
-#[derive(defmt::Format, Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(defmt::Format, Copy, Clone, PartialEq, Eq)]
 pub enum NmtState {
     /// Power-on state, immediately followed by a single boot-up
     /// message and a transition to `PreOperational`. We never

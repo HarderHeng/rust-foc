@@ -55,7 +55,8 @@ pub mod status {
 
 // ---- Internal storage -----------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 struct DtcRecord {
     code: DtcCode,
     status: u8,

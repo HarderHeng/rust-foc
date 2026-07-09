@@ -8,7 +8,8 @@
 // ---- Session (0x10) ----
 
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Session {
     Default = 0x01,
     Programming = 0x02,
@@ -30,7 +31,8 @@ impl Session {
 // ---- SecurityLevel (0x27) ----
 
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum SecurityLevel {
     Locked = 0,
     Sal1 = 1,
@@ -53,7 +55,8 @@ impl SecurityLevel {
 
 // ---- SrvState (engine state machine) ----
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum SrvState {
     /// Accept new requests.
     Idle,
@@ -65,7 +68,8 @@ pub enum SrvState {
 
 #[allow(dead_code)]
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Nrc {
     GeneralReject                                  = 0x10,
     ServiceNotSupported                            = 0x11,

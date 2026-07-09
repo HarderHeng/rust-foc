@@ -12,7 +12,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 
 /// Shell → motor command. `Copy` so we can hand it off without allocation.
-#[derive(Clone, Copy, Debug)]
+#[derive(defmt::Format, Clone, Copy)]
 pub struct OpenLoopCmd {
     /// `true` ⇒ motor task should ramp voltage up and run.
     /// `false` ⇒ motor task should ramp voltage to 0 and gate the PWM.

@@ -55,7 +55,7 @@ pub const SID_REQUEST_TRANSFER_EXIT: u8 = 0x37;
 
 /// State machine for the OTA transfer.
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(defmt::Format, Copy, Clone, PartialEq, Eq)]
 pub enum OtaState {
     Idle = 0,
     Receiving = 1,
@@ -430,7 +430,7 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
 /// Negative response codes. Only the ones we actually send.
 #[allow(dead_code)]
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(defmt::Format, Copy, Clone, PartialEq, Eq)]
 enum NRC {
     IncorrectMessageLength    = 0x13,
     ResponseTooLong           = 0x14,

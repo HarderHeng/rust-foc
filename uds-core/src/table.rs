@@ -26,7 +26,8 @@ use crate::uds_log;
 /// Tag for the built-in SID dispatchers. Used by the platform's
 /// `dispatch` function to route a request to the right
 /// `dispatch_0xNN` method. There is one variant per built-in SID.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ServiceHandler {
     Session,        // 0x10
     EcuReset,       // 0x11
@@ -51,7 +52,8 @@ pub enum ServiceHandler {
 /// One row in the service table. The platform's dispatcher looks
 /// up SID, gates on session+security, and then calls the matching
 /// `ServiceHandler::dispatch_*` method.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct ServiceEntry {
     pub sid: u8,
     /// Bitmask of allowed sessions: bit 0 = Default, bit 1 =
@@ -695,7 +697,8 @@ impl UdsConfig {
 // Helpers shared by the 0x27 dispatcher
 // ============================================================================
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum RoutineSub {
     Start,
     Stop,

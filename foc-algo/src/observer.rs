@@ -70,7 +70,8 @@ use libm::atan2f;
 use crate::math::LibmTrig;
 
 /// SMO configuration — set once at init.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SmoConfig {
     /// Stator resistance (Ω).
     pub rs: f32,
