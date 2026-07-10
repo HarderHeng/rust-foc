@@ -6,10 +6,16 @@ fn main() {
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
     fs::write(out.join("memory.x"), include_bytes!("memory.x")).unwrap();
 
-    // Redirect stub at 0x08000000: SP from _stack_start, PC placeholder
-    fs::write(out.join("redirect.x"),
-        b"SECTIONS { .redirect 0x08000000 : { LONG(_stack_start) LONG(0) } > FLASH }\nINSERT BEFORE .vector_table;\n"
-    ).unwrap();
+    // redirect + fixup: the linker computes the reset vector from .text address
+    fs::write(out.join("redirect.x"), concat!(
+        "SECTIONS {\n",
+        "  .redirect 0x08000000 : {\n",
+        "    LONG(_stack_start)\n",
+        "    LONG(ABSOLUTE(ADDR(.text)) | 1)\n",
+        "  } > FLASH\n",
+        "}\n",
+        "INSERT BEFORE .vector_table;\n"
+    ).as_bytes()).unwrap();
 
     println!("cargo:rustc-link-search={}", out.display());
     println!("cargo:rustc-link-arg-bins=-Tredirect.x");
