@@ -9,7 +9,6 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
     println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
     println!("cargo:rerun-if-changed=memory.x");
-
     println!("cargo:rustc-env=FOC_VERSION={}", env!("CARGO_PKG_VERSION"));
     let sha = std::process::Command::new("git").args(["rev-parse","--short","HEAD"]).output().ok()
         .and_then(|o| if o.status.success() { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { None })
