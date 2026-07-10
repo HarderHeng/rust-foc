@@ -48,7 +48,6 @@ use defmt::{info, warn};
 const DFU_START:  u32 = 0x0801_3000;
 const DFU_END:    u32 = 0x0801_F800; // 50 KB
 const STATE_ADDR: u32 = 0x0800_6000;
-const SWAP_MAGIC: u8  = 0xF0;
 
 
 // ---- UDS service IDs (subset) -----------------------------------------
@@ -470,11 +469,11 @@ fn crc32_update(crc: u32, byte: u8) -> u32 {
 }
 
 unsafe fn write_swap_magic() -> Result<(), flash::FlashError> {
-    // Erase the STATE page (2 KB) then write SWAP_MAGIC (0xF0) as the
-    // first byte. embassy-boot reads this on boot and swaps DFU→ACTIVE.
-    let page_start = STATE_ADDR & !(2047u32);
-    flash::erase_region(page_start, page_start + 2048)?;
-    flash::write_u64(STATE_ADDR, page_start, page_start + 2048, SWAP_MAGIC as u64)
+    // embassy-boot state format: byte0=magic, byte1=validity(1), byte2+=progress(0)
+    // Write SWAP_MAGIC (0xF0) with validity=1 and progress=0.
+    let page = STATE_ADDR & !2047;
+    flash::erase_region(page, page + 2048)?;
+    flash::write_u64(STATE_ADDR, page, page + 2048, 0x0000_0000_0001_00F0_u64)
 }
 
 

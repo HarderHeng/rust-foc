@@ -98,14 +98,11 @@ fn feed_watchdog() {
 }
 
 fn mark_booted() {
-    // Write BOOT_MAGIC (0xD0) to STATE partition to confirm successful boot.
-    // After embassy-boot swaps DFU→ACTIVE, it leaves REVERT_MAGIC (0xC0).
-    // Changing it to BOOT_MAGIC prevents the swap from being reverted.
+    // embassy-boot state: byte0=BOOT_MAGIC(0xD0), byte1=valid(1), rest=0.
     const STATE_ADDR: u32 = 0x0800_6000;
-    const BOOT_MAGIC: u8 = 0xD0;
     unsafe {
         let page = STATE_ADDR & !2047;
         let _ = crate::drivers::flash::erase_region(page, page + 2048);
-        let _ = crate::drivers::flash::write_u64(STATE_ADDR, page, page + 2048, BOOT_MAGIC as u64);
+        let _ = crate::drivers::flash::write_u64(STATE_ADDR, page, page + 2048, 0x0000_0000_0001_00D0_u64);
     }
 }
