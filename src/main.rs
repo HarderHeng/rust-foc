@@ -98,7 +98,10 @@ fn feed_watchdog() {
 }
 
 fn mark_booted() {
-    // embassy-boot state: byte0=BOOT_MAGIC(0xD0), byte1=valid(1), rest=0.
+    // Write BOOT_MAGIC (0xD0) with valid=1 marker to STATE partition.
+    // embassy-boot state format: byte0=magic, byte1=validity, byte2+=progress.
+    // After a swap the bootloader leaves REVERT_MAGIC (0xC0); this confirms
+    // the new firmware as bootable, preventing automatic rollback.
     const STATE_ADDR: u32 = 0x0800_6000;
     unsafe {
         let page = STATE_ADDR & !2047;
