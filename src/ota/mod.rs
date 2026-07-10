@@ -45,8 +45,8 @@ use critical_section::Mutex;
 use defmt::{info, warn};
 
 // DFU partition (embassy-boot swap model)
-const DFU_START:  u32 = 0x0801_3000;
-const DFU_END:    u32 = 0x0801_F800; // 50 KB
+const DFU_START:  u32 = 0x0801_4000;
+const DFU_END:    u32 = 0x0802_0000; // 48 KB
 const STATE_ADDR: u32 = 0x0800_6000;
 
 
