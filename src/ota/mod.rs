@@ -469,11 +469,20 @@ fn crc32_update(crc: u32, byte: u8) -> u32 {
 }
 
 unsafe fn write_swap_magic() -> Result<(), flash::FlashError> {
-    // embassy-boot state format: byte0=magic, byte1=validity(1), byte2+=progress(0)
-    // Write SWAP_MAGIC (0xF0) with validity=1 and progress=0.
+    // C1: embassy-boot's `read_state` checks that **every** byte in
+    // the 8-byte state word equals SWAP_MAGIC (0xF0):
+    //   `!state_word.iter().any(|&b| b != SWAP_MAGIC)`
+    // The canonical pattern is `state.write(0, &[BOOT_MAGIC; 4])` —
+    // every byte of the state word is the magic. The previous value
+    // `0x0000_0000_0001_00F0_u64` (only byte 0 = 0xF0) failed this
+    // check, so the bootloader always fell through to `State::Boot`
+    // and the swap never triggered. The new image would sit in DFU
+    // forever while the device kept booting the old ACTIVE firmware.
+    //
+    // Fill all 8 bytes with SWAP_MAGIC.
     let page = STATE_ADDR & !2047;
     flash::erase_region(page, page + 2048)?;
-    flash::write_u64(STATE_ADDR, page, page + 2048, 0x0000_0000_0001_00F0_u64)
+    flash::write_u64(STATE_ADDR, page, page + 2048, 0xF0F0_F0F0_F0F0_F0F0_u64)
 }
 
 

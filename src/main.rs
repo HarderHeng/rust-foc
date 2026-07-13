@@ -98,14 +98,21 @@ fn feed_watchdog() {
 }
 
 fn mark_booted() {
-    // Write BOOT_MAGIC (0xD0) with valid=1 marker to STATE partition.
-    // embassy-boot state format: byte0=magic, byte1=validity, byte2+=progress.
-    // After a swap the bootloader leaves REVERT_MAGIC (0xC0); this confirms
-    // the new firmware as bootable, preventing automatic rollback.
+    // C1: embassy-boot's `read_state` checks that **every** byte in
+    // the 8-byte state word equals the magic (BOOT_MAGIC = 0xD0).
+    // The previous `0x0000_0000_0001_00D0_u64` only set byte 0 to
+    // 0xD0 — the rest of the word didn't match, so the bootloader
+    // couldn't tell the boot was confirmed and the new image would
+    // be reverted on the next power-cycle. Fill all 8 bytes with
+    // BOOT_MAGIC instead.
+    //
+    // Side effect: with the magic written correctly, the bootloader
+    // stops re-entering the swap loop on the next boot and the new
+    // ACTIVE firmware sticks.
     const STATE_ADDR: u32 = 0x0800_6000;
     unsafe {
         let page = STATE_ADDR & !2047;
         let _ = crate::drivers::flash::erase_region(page, page + 2048);
-        let _ = crate::drivers::flash::write_u64(STATE_ADDR, page, page + 2048, 0x0000_0000_0001_00D0_u64);
+        let _ = crate::drivers::flash::write_u64(STATE_ADDR, page, page + 2048, 0xD0D0_D0D0_D0D0_D0D0_u64);
     }
 }
