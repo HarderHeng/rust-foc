@@ -152,13 +152,24 @@ impl FocController {
         if dt <= 0.0 {
             return;
         }
-        // NaN / Inf guard on measurements.  A transient ADC glitch or
-        // sensor stall must not poison the speed/current PIs.  Leave
-        // controller state intact, but force duty to safe zero this cycle.
+        // C9: NaN / Inf guard on **all** controller inputs (measurements
+        // AND setpoints). A transient ADC glitch, encoder error, or a
+        // bad config (e.g. NaN from `torque_to_iq_ipm` with an IPM
+        // denominator near zero) must not poison the PI integrators.
+        //
+        // Previous behaviour: guard tripped, duty forced to 0, but
+        // integrators were left intact. With a single NaN measurement
+        // the integrators absorbed NaN and the controller latched
+        // disabled until power-cycle. Now the guard also clears every
+        // integrator so a clean cycle after the fault can run normally.
         if !self.meas.ia.is_finite() || !self.meas.ib.is_finite()
             || !self.meas.theta.is_finite() || !self.meas.vdc.is_finite()
-            || !self.meas.speed.is_finite()
+            || !self.meas.speed.is_finite() || !self.meas.position.is_finite()
+            || !self.meas.accel.is_finite()
+            || !self.target.iq.is_finite() || !self.target.id_ref.is_finite()
+            || !self.target.speed_ref.is_finite() || !self.target.position.is_finite()
         {
+            self.zero_integrators();
             self.duty = Duty { ta: 0.0, tb: 0.0, tc: 0.0 };
             return;
         }
@@ -239,6 +250,28 @@ impl FocController {
             }
             Mode::Torque | Mode::Off => {}
         }
+    }
+
+    /// Zero every PI integrator in the cascade.
+    ///
+    /// C9: called by the NaN/Inf input guard in `update()`. With a
+    /// single NaN in `meas` or `target` the duty-zero guard already
+    /// short-circuits the current cycle, but if we leave the
+    /// integrators intact they will absorb NaN on the next integration
+    /// step and the controller latches disabled until power-cycle.
+    /// Clearing them lets a clean cycle after the fault run normally.
+    ///
+    /// Public so the application can also call it explicitly (e.g.
+    /// when switching from sensor-fault recovery back to closed-loop).
+    pub fn zero_integrators(&mut self) {
+        self.current.d_pid.integral = 0.0;
+        self.current.q_pid.integral = 0.0;
+        self.speed_pid().integral = 0.0;
+        self.position_pid().integral = 0.0;
+        // Clear prev_measurement on the D-terms so the next derivative
+        // step doesn't compute against a stale (possibly NaN) value.
+        self.current.d_pid.prev_measurement = None;
+        self.current.q_pid.prev_measurement = None;
     }
 
     /// Apply Off-mode state: zero duty, optionally reset integrators.
@@ -691,20 +724,20 @@ mod tests {
 
     #[test]
     fn update_with_nan_measurement_is_safe() {
-        // Prime the controller so integrators and runtime have non-default
-        // values, then poison `meas.ia`.  Guard must (a) zero duty, (b) leave
-        // every integrator and runtime field at its pre-call value.
+        // C9: prime the controller so integrators and runtime have
+        // non-default values, then poison `meas.ia`. Guard must (a) zero
+        // duty, (b) zero every PI integrator. Preserving a NaN
+        // integrator would latch the controller disabled until
+        // power-cycle.
         let mut c = make(Mode::Torque);
         c.iq_ramp.rate_limit = 0.0;
         c.speed_pid().kp = 1.0;
         c.speed_pid().ki = 1.0;
         c.target.iq = 1.0;
         c.update::<LibmTrig>(0.01);
-        let speed_integral_before = c.speed.pid.integral;
-        let d_pid_integral_before = c.current.d_pid.integral;
-        let q_pid_integral_before = c.current.q_pid.integral;
-        let iq_target_before = c.runtime.iq_target;
-        let iq_command_before = c.runtime.iq_command;
+        // Verify the controller actually accumulated something.
+        assert!(c.speed.pid.integral.abs() > 0.0,
+            "test pre-condition: speed PID must have integrated");
 
         // Inject the bad measurement.
         c.meas.ia = f32::NAN;
@@ -715,13 +748,14 @@ mod tests {
         approx(c.duty.tb, 0.0);
         approx(c.duty.tc, 0.0);
 
-        // Integrator state preserved — the loop must recover once the
-        // measurement clears.
-        approx(c.speed.pid.integral, speed_integral_before);
-        approx(c.current.d_pid.integral, d_pid_integral_before);
-        approx(c.current.q_pid.integral, q_pid_integral_before);
-        approx(c.runtime.iq_target, iq_target_before);
-        approx(c.runtime.iq_command, iq_command_before);
+        // C9: integrators zeroed so the controller can recover on
+        // the next clean cycle. Runtime fields are unchanged because
+        // they're diagnostic-only — the duty-zero guard is the
+        // safety mechanism, not the runtime flags.
+        approx(c.current.d_pid.integral, 0.0);
+        approx(c.current.q_pid.integral, 0.0);
+        approx(c.speed.pid.integral, 0.0);
+        approx(c.position.pid.integral, 0.0);
     }
 
     #[test]
@@ -731,7 +765,8 @@ mod tests {
         let mut c = make(Mode::Torque);
         c.target.iq = 0.5;
         c.update::<LibmTrig>(0.01);
-        let speed_integral_before = c.speed.pid.integral;
+        assert!(c.speed.pid.integral.abs() > 0.0,
+            "test pre-condition: speed PID must have integrated");
 
         c.meas.vdc = f32::INFINITY;
         c.update::<LibmTrig>(0.001);
@@ -739,7 +774,28 @@ mod tests {
         approx(c.duty.ta, 0.0);
         approx(c.duty.tb, 0.0);
         approx(c.duty.tc, 0.0);
-        approx(c.speed.pid.integral, speed_integral_before);
+        approx(c.speed.pid.integral, 0.0);
+    }
+
+    #[test]
+    fn update_with_nan_target_is_safe() {
+        // C9: a NaN in `target` (e.g. from a bad config or
+        // `torque_to_iq_ipm` returning NaN) must also be guarded.
+        // Previously the guard only checked `meas`, so a NaN target
+        // could reach the current loop and poison the PIs.
+        let mut c = make(Mode::Torque);
+        c.target.iq = 1.0;
+        c.update::<LibmTrig>(0.01);
+        assert!(c.current.q_pid.integral.abs() > 0.0,
+            "test pre-condition: q PID must have integrated");
+
+        c.target.iq = f32::NAN;
+        c.update::<LibmTrig>(0.001);
+
+        approx(c.duty.ta, 0.0);
+        approx(c.current.d_pid.integral, 0.0);
+        approx(c.current.q_pid.integral, 0.0);
+        approx(c.speed.pid.integral, 0.0);
     }
 
     #[test]
