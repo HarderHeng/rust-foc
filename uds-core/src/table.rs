@@ -129,8 +129,10 @@ pub struct UdsConfig {
     pub routines_stop: &'static [RoutineEntry],
     pub routines_result: &'static [RoutineEntry],
 
-    /// Pending queue slots.
-    pub pending_queue: &'static mut [Option<crate::pending::PendingJob>],
+    /// Pending queue slots. A fixed-size array (not a slice) so the
+    /// struct stays const-initialisable inside a `Mutex::new(...)`
+    /// static. Length is `crate::pending::PENDING_QUEUE_SIZE`.
+    pub pending_queue: [Option<crate::pending::PendingJob>; crate::pending::PENDING_QUEUE_SIZE],
 
     /// P2 server timer (ms). When a request stays in
     /// `SrvState::Pending` for longer than this, the dispatcher

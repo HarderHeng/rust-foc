@@ -73,6 +73,10 @@ pub struct BoardHandles {
     /// return; the canopen task does the boot-up message and
     /// the 1 Hz heartbeat.
     pub can: Can<'static>,
+    /// C2: Independent Watchdog peripheral. Caller (main) starts
+    /// the watchdog and stores the handle in `crate::wdog`; the
+    /// heartbeat task refreshes it every 500 ms.
+    pub iwdg: embassy_stm32::Peri<'static, embassy_stm32::peripherals::IWDG>,
 }
 
 /// System clock: HSE 8 MHz → PLL ×85 /4 = 170 MHz.
@@ -194,5 +198,6 @@ pub fn board_init(p: Peripherals) -> BoardHandles {
         debug_uart: Uart2Sink::new(buffered),
         motor_pwm: MotorPwm::new(pwm),
         can: init_fdcan1(p.FDCAN1, p.PB9, p.PA11),
+        iwdg: p.IWDG.into(),
     }
 }

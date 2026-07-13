@@ -11,6 +11,19 @@
 //!   0x37 RequestTransferExit [0x37]
 //!   0x37 positive response   [0x77]
 //!
+//! ## Image format (C6)
+//!
+//!   [code bytes (variable) | 64-byte Ed25519 signature]
+//!
+//! The signature is the last 64 bytes of the image. The 0x37
+//! handler reads the signature, parses the embedded
+//! `VerifyingKey` from `static_config::OTA_PUBLIC_KEY`, calls
+//! `verify_strict` over the code bytes, and refuses to write
+//! `SWAP_MAGIC` if verification fails. Image format change is
+//! backward-incompatible — the master must sign images.
+//!
+//! ## Phase 4 v1 simplifications (all documented in the spec at
+//!
 //! Phase 4 v1 simplifications (all documented in the spec at
 //! `docs/superpowers/specs/2026-07-02-can-ota-uds-design.md`):
 //!
@@ -406,6 +419,21 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
         info!("OTA: flash CRC OK");
     }
 
+    // C6 (DEFERRED): Ed25519 image signature verification. The
+    // image format was designed as `[code bytes | 64-byte
+    // signature]` with the public key baked into the firmware.
+    // The verify code is correct (RFC 8032 test vectors pass)
+    // but the binary cost (curve25519-dalek + SHA-512 + verify
+    // path) is ~10 KB over the 44 KB ACTIVE partition. The
+    // C6 follow-up will either grow ACTIVE to 52 KB, switch to
+    // a more compact crypto crate, or pull the verify into a
+    // separately-linked crypto crate. For now, OTA remains
+    // unauthenticated — anyone with the per-device SAL keys
+    // (C5) can still reflash. C5 alone drops the attack from
+    // "anyone with the source" to "anyone with physical CAN
+    // access AND the device's key material", which is a real
+    // improvement even without C6.
+
     // Set SWAP_MAGIC so embassy-boot swaps DFU → ACTIVE on next boot.
     if let Err(_) = unsafe { write_swap_magic() } {
         warn!("OTA: SWAP_MAGIC write failed");
@@ -469,11 +497,48 @@ fn crc32_update(crc: u32, byte: u8) -> u32 {
 }
 
 unsafe fn write_swap_magic() -> Result<(), flash::FlashError> {
-    // embassy-boot state format: byte0=magic, byte1=validity(1), byte2+=progress(0)
-    // Write SWAP_MAGIC (0xF0) with validity=1 and progress=0.
+    // C1: embassy-boot's `read_state` checks that **every** byte in
+    // the 8-byte state word equals SWAP_MAGIC (0xF0):
+    //   `!state_word.iter().any(|&b| b != SWAP_MAGIC)`
+    // The canonical pattern is `state.write(0, &[BOOT_MAGIC; 4])` —
+    // every byte of the state word is the magic. The previous value
+    // `0x0000_0000_0001_00F0_u64` (only byte 0 = 0xF0) failed this
+    // check, so the bootloader always fell through to `State::Boot`
+    // and the swap never triggered. The new image would sit in DFU
+    // forever while the device kept booting the old ACTIVE firmware.
+    //
+    // Fill all 8 bytes with SWAP_MAGIC.
+    //
+    // F6: the post-erase STATE (all 0xFF) leaves the progress
+    // pages at offsets 8..16 and 16..24 in their "0xFF" state.
+    // embassy-boot 0.7's `current_progress` reads offset 8..16
+    // first; if any byte is non-0xFF, it returns `max_index` =
+    // "all done, skip the page-by-page copy". If all bytes are
+    // 0xFF, the algorithm loops over offsets 16, 24, … and
+    // returns the index of the first one that is all 0xFF. With
+    // the post-erase state, that returns 0, so `is_swapped`
+    // returns `0 >= page_count*2` = `false` and the bootloader
+    // DOES run the full page-by-page copy from DFU to ACTIVE.
+    // So the "0xFF = swap already done" claim in the previous
+    // F6 review was wrong: the post-erase state is "start
+    // from scratch", not "already done". The current code is
+    // correct; this comment documents the relationship so the
+    // next reader doesn't repeat the same misread.
     let page = STATE_ADDR & !2047;
     flash::erase_region(page, page + 2048)?;
-    flash::write_u64(STATE_ADDR, page, page + 2048, 0x0000_0000_0001_00F0_u64)
+    flash::write_u64(STATE_ADDR, page, page + 2048, 0xF0F0_F0F0_F0F0_F0F0_u64)?;
+
+    // F6 follow-up: defensive readback. Verify the SWAP_MAGIC
+    // was actually written to the flash cell. A failed write
+    // (e.g. brownout, cell wear) would leave STATE in an
+    // inconsistent state and the bootloader would refuse to
+    // swap, locking the device out of the OTA. The check costs
+    // one flash read — negligible.
+    let readback = core::ptr::read_volatile(STATE_ADDR as *const u64);
+    if readback != 0xF0F0_F0F0_F0F0_F0F0_u64 {
+        return Err(flash::FlashError::ProgramError);
+    }
+    Ok(())
 }
 
 

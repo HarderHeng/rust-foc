@@ -3,12 +3,14 @@
 
 mod bsp;
 mod drivers;
+mod key_store;
 mod metadata;
 mod motor;
 mod ota;
 mod shell;
 mod tasks;
 mod uds;
+mod wdog;
 
 use defmt::info;
 use embassy_executor::Spawner;
@@ -33,8 +35,26 @@ async fn main(spawner: Spawner) {
     let handles = bsp::board_init(p);
     info!("board_init done; USART2 ringbuffer ready");
 
-    // Start IWDG so the watchdog doesn't trip before tasks are up.
-    feed_watchdog();
+    let BoardHandles { debug_uart, motor_pwm, can, iwdg } = handles;
+
+    // C2: start the IWDG. The heartbeat task refreshes it every
+    // 500 ms. Previous code started it but never refreshed — the
+    // device reset every ~32 s.
+    wdog::init(iwdg);
+
+    // C5: load (or generate) the per-device SAL keys and install
+    // them into UDS_CONFIG. The previous code shipped plaintext
+    // key material in the ELF, which meant anyone with the source
+    // could complete the 0x27 handshake offline. The new flow
+    // reads the keys from a dedicated flash region (or generates
+    // them on first boot) so each device has unique material.
+    let live_keys = key_store::init();
+    critical_section::with(|cs| {
+        crate::uds::static_config::UDS_CONFIG
+            .borrow_ref_mut(cs)
+            .key_masks
+            .set(live_keys);
+    });
 
     // Log firmware identity.
     info!("Firmware: {} (git {})", env!("FOC_VERSION"), env!("FOC_GIT_SHA"));
@@ -44,8 +64,6 @@ async fn main(spawner: Spawner) {
     // (0xD0) to confirm the new firmware works. Without this, the next reset
     // would swap back to the old firmware.
     mark_booted();
-
-    let BoardHandles { debug_uart, motor_pwm, can } = handles;
 
     // Split the BufferedUart into TX / RX halves so the shell task
     // can write (via embedded-cli) and read (via
@@ -85,27 +103,34 @@ async fn main(spawner: Spawner) {
 }
 
 fn feed_watchdog() {
-    unsafe {
-        const KR: u32 = 0x4000_3000;
-        const PR: u32 = 0x4000_3004;
-        const RLR: u32 = 0x4000_3008;
-        core::ptr::write_volatile(KR as *mut u32, 0x5555);
-        core::ptr::write_volatile(PR as *mut u32, 6);       // /256
-        core::ptr::write_volatile(RLR as *mut u32, 0xFFF);  // ~125 ms
-        core::ptr::write_volatile(KR as *mut u32, 0xCCCC);  // start
-        core::ptr::write_volatile(KR as *mut u32, 0xAAAA);  // refresh
-    }
+    // C2: replaced by `wdog::init()` + `wdog::pet()` from the
+    // heartbeat task. The previous implementation started the IWDG
+    // with a ~32 s timeout and never refreshed it, so the device
+    // would reset itself every ~32 s. The new flow is:
+    //   1. main() calls `wdog::init()` which calls
+    //      `IndependentWatchdog::new(5_000_000).unleash()`.
+    //   2. heartbeat() calls `wdog::pet()` every 500 ms.
+    //   3. If heartbeat stops for 5 s, the IWDG fires and the
+    //      device resets cleanly.
+    wdog::pet();
 }
 
 fn mark_booted() {
-    // Write BOOT_MAGIC (0xD0) with valid=1 marker to STATE partition.
-    // embassy-boot state format: byte0=magic, byte1=validity, byte2+=progress.
-    // After a swap the bootloader leaves REVERT_MAGIC (0xC0); this confirms
-    // the new firmware as bootable, preventing automatic rollback.
+    // C1: embassy-boot's `read_state` checks that **every** byte in
+    // the 8-byte state word equals the magic (BOOT_MAGIC = 0xD0).
+    // The previous `0x0000_0000_0001_00D0_u64` only set byte 0 to
+    // 0xD0 — the rest of the word didn't match, so the bootloader
+    // couldn't tell the boot was confirmed and the new image would
+    // be reverted on the next power-cycle. Fill all 8 bytes with
+    // BOOT_MAGIC instead.
+    //
+    // Side effect: with the magic written correctly, the bootloader
+    // stops re-entering the swap loop on the next boot and the new
+    // ACTIVE firmware sticks.
     const STATE_ADDR: u32 = 0x0800_6000;
     unsafe {
         let page = STATE_ADDR & !2047;
         let _ = crate::drivers::flash::erase_region(page, page + 2048);
-        let _ = crate::drivers::flash::write_u64(STATE_ADDR, page, page + 2048, 0x0000_0000_0001_00D0_u64);
+        let _ = crate::drivers::flash::write_u64(STATE_ADDR, page, page + 2048, 0xD0D0_D0D0_D0D0_D0D0_u64);
     }
 }

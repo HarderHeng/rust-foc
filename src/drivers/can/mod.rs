@@ -37,11 +37,13 @@ pub mod canopen;
 pub mod uds_bridge;
 
 use defmt::info;
+use embassy_stm32::can::filter::{Action, FilterType, StandardFilter, StandardFilterSlot};
 use embassy_stm32::{
     bind_interrupts,
     can::{Can, CanConfigurator, IT0InterruptHandler, IT1InterruptHandler},
     peripherals::FDCAN1,
 };
+use embedded_can::StandardId;
 
 bind_interrupts!(struct CanIrqs {
     FDCAN1_IT0 => IT0InterruptHandler<FDCAN1>;
@@ -85,9 +87,29 @@ pub fn init_fdcan1(
     // enable transceiver delay compensation (TDC), required
     // by the FDCAN peripheral at >1 Mbps.
     configurator.set_fd_data_bitrate(CAN_FD_DATA_BITRATE_BPS, true);
+
+    // C7: hardware acceptance filter — see below, applied
+    // after `into_normal_mode()` (the API is on `Can`, not
+    // `CanConfigurator`).
     let can = configurator.into_normal_mode();
+    let props = can.properties();
+    let accepted_ids: [u16; 3] = [0x000, 0x7DF, 0x7E0];
+    for (i, &id) in accepted_ids.iter().enumerate() {
+        let std_id = StandardId::new(id).expect("11-bit ID");
+        let filter = StandardFilter {
+            filter: FilterType::DedicatedSingle(std_id),
+            action: Action::StoreInFifo0,
+        };
+        props.set_standard_filter(StandardFilterSlot::from(i as u8), filter);
+    }
+    for i in 3..28u8 {
+        props.set_standard_filter(
+            StandardFilterSlot::from(i),
+            StandardFilter::reject_all(),
+        );
+    }
     info!(
-        "FDCAN1 ready: CAN-FD {} kbps nominal + {} kbps data (PB9 TX / PA11 RX)",
+        "FDCAN1 ready: CAN-FD {} kbps nominal + {} kbps data (PB9 TX / PA11 RX); 3 ID filters, 25 reject-all",
         CAN_BITRATE_BPS / 1000, CAN_FD_DATA_BITRATE_BPS / 1000
     );
     can
