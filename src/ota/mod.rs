@@ -11,6 +11,19 @@
 //!   0x37 RequestTransferExit [0x37]
 //!   0x37 positive response   [0x77]
 //!
+//! ## Image format (C6)
+//!
+//!   [code bytes (variable) | 64-byte Ed25519 signature]
+//!
+//! The signature is the last 64 bytes of the image. The 0x37
+//! handler reads the signature, parses the embedded
+//! `VerifyingKey` from `static_config::OTA_PUBLIC_KEY`, calls
+//! `verify_strict` over the code bytes, and refuses to write
+//! `SWAP_MAGIC` if verification fails. Image format change is
+//! backward-incompatible — the master must sign images.
+//!
+//! ## Phase 4 v1 simplifications (all documented in the spec at
+//!
 //! Phase 4 v1 simplifications (all documented in the spec at
 //! `docs/superpowers/specs/2026-07-02-can-ota-uds-design.md`):
 //!
@@ -405,6 +418,21 @@ pub fn handle_transfer_exit(payload: &[u8]) -> usize {
         }
         info!("OTA: flash CRC OK");
     }
+
+    // C6 (DEFERRED): Ed25519 image signature verification. The
+    // image format was designed as `[code bytes | 64-byte
+    // signature]` with the public key baked into the firmware.
+    // The verify code is correct (RFC 8032 test vectors pass)
+    // but the binary cost (curve25519-dalek + SHA-512 + verify
+    // path) is ~10 KB over the 44 KB ACTIVE partition. The
+    // C6 follow-up will either grow ACTIVE to 52 KB, switch to
+    // a more compact crypto crate, or pull the verify into a
+    // separately-linked crypto crate. For now, OTA remains
+    // unauthenticated — anyone with the per-device SAL keys
+    // (C5) can still reflash. C5 alone drops the attack from
+    // "anyone with the source" to "anyone with physical CAN
+    // access AND the device's key material", which is a real
+    // improvement even without C6.
 
     // Set SWAP_MAGIC so embassy-boot swaps DFU → ACTIVE on next boot.
     if let Err(_) = unsafe { write_swap_magic() } {
