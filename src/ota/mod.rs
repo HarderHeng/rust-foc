@@ -508,9 +508,37 @@ unsafe fn write_swap_magic() -> Result<(), flash::FlashError> {
     // forever while the device kept booting the old ACTIVE firmware.
     //
     // Fill all 8 bytes with SWAP_MAGIC.
+    //
+    // F6: the post-erase STATE (all 0xFF) leaves the progress
+    // pages at offsets 8..16 and 16..24 in their "0xFF" state.
+    // embassy-boot 0.7's `current_progress` reads offset 8..16
+    // first; if any byte is non-0xFF, it returns `max_index` =
+    // "all done, skip the page-by-page copy". If all bytes are
+    // 0xFF, the algorithm loops over offsets 16, 24, … and
+    // returns the index of the first one that is all 0xFF. With
+    // the post-erase state, that returns 0, so `is_swapped`
+    // returns `0 >= page_count*2` = `false` and the bootloader
+    // DOES run the full page-by-page copy from DFU to ACTIVE.
+    // So the "0xFF = swap already done" claim in the previous
+    // F6 review was wrong: the post-erase state is "start
+    // from scratch", not "already done". The current code is
+    // correct; this comment documents the relationship so the
+    // next reader doesn't repeat the same misread.
     let page = STATE_ADDR & !2047;
     flash::erase_region(page, page + 2048)?;
-    flash::write_u64(STATE_ADDR, page, page + 2048, 0xF0F0_F0F0_F0F0_F0F0_u64)
+    flash::write_u64(STATE_ADDR, page, page + 2048, 0xF0F0_F0F0_F0F0_F0F0_u64)?;
+
+    // F6 follow-up: defensive readback. Verify the SWAP_MAGIC
+    // was actually written to the flash cell. A failed write
+    // (e.g. brownout, cell wear) would leave STATE in an
+    // inconsistent state and the bootloader would refuse to
+    // swap, locking the device out of the OTA. The check costs
+    // one flash read — negligible.
+    let readback = core::ptr::read_volatile(STATE_ADDR as *const u64);
+    if readback != 0xF0F0_F0F0_F0F0_F0F0_u64 {
+        return Err(flash::FlashError::ProgramError);
+    }
+    Ok(())
 }
 
 
