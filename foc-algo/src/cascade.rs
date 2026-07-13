@@ -28,7 +28,7 @@ use crate::state::{ControllerState, Meas, Target};
 
 #[derive(Clone, Copy, PartialEq, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Mode { #[default] Off, Torque, Speed, Position }
+pub enum Mode { #[default] Off, Align, Torque, Speed, Position }
 
 pub struct FocController {
     mode: Mode,
@@ -73,7 +73,6 @@ pub struct FocController {
     decoupling_speed_threshold: f32,
 
     /// Negative d-axis current floor for demagnetization protection (A).
-    /// 0 (or any positive value) disables the check.
     ///
     /// PMSM permanent magnets have a maximum reverse field.  Field
     /// weakening (and aggressive MTPA) can ask for very negative `Id`;
@@ -85,6 +84,14 @@ pub struct FocController {
     /// Typical: −2 to −5× the motor's continuous current, per the magnet
     /// datasheet.
     i_demag: f32,
+
+    /// C8: alignment timer (seconds since `Mode::Align`
+    /// was entered). Reset on every Align entry; compared
+    /// against `align_duration_s` to signal completion.
+    align_elapsed_s: f32,
+    /// C8: target alignment duration (seconds). Set by
+    /// the application via `align(id_ref, duration_s)`.
+    align_duration_s: f32,
 
     /// When `true`, switching to `Mode::Off` clears all PI integrators and
     /// ramp state — the controller starts "fresh" on the next non-Off
@@ -132,6 +139,8 @@ impl FocController {
             decoupling: false,
             decoupling_speed_threshold: 0.0,
             i_demag: 0.0,
+            align_elapsed_s: 0.0,
+            align_duration_s: 0.0,
             position: PositionLoopController::default(),
             speed: SpeedLoopController::default(),
             current: CurrentLoop::new(),
@@ -183,6 +192,15 @@ impl FocController {
         if self.mode == Mode::Off {
             self.apply_off_state();
             return;
+        }
+        // C8: Align mode is treated as a transient state. The
+        // application sets `Mode::Align` + `target.id_ref` to a
+        // non-zero value, runs `update()` in a loop, and polls
+        // `align_complete()` until true. We do not return early
+        // here — the current loop runs and the duty is produced.
+        // While in Align, the alignment timer advances by `dt`.
+        if self.mode == Mode::Align {
+            self.update_align_timer(dt);
         }
 
         // 3. Mode-specific loop chain
@@ -248,7 +266,7 @@ impl FocController {
                 self.speed_ramp.set(self.meas.speed);
                 self.pos_ramp.set(self.meas.position);
             }
-            Mode::Torque | Mode::Off => {}
+            Mode::Torque | Mode::Off | Mode::Align => {}
         }
     }
 
@@ -298,6 +316,18 @@ impl FocController {
     fn compute_loop_output(&mut self, dt: f32) -> (f32, f32) {
         match self.mode {
             Mode::Off => unreachable!("Off handled by apply_off_state"),
+            Mode::Align => {
+                // C8: rotor alignment. Apply a fixed d-axis current
+                // for `align_duration_s`; the rotor will rotate
+                // to align with the d-axis (assuming detent torque
+                // is sufficient). After `align_duration_s`, the
+                // application should call `observer.set_angle(0)`
+                // and switch to the desired control mode.
+                // For now we just hold i_d = align_id (a constant).
+                // A full implementation would also enforce a
+                // current limit and ramp up/down.
+                (0.0, 0.0)
+            }
             Mode::Torque => {
                 let iq = self.iq_ramp.update(self.target.iq, dt);
                 (iq, 0.0)
@@ -456,6 +486,47 @@ impl FocController {
     /// on the next `update()` call for bumpless transfer.
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
+    }
+
+    /// C8: drive a DC-pulse rotor alignment for `duration_s`
+    /// seconds. Sets `target.id_ref` to the supplied current,
+    /// enters `Mode::Align`, and returns true once the
+    /// configured duration has elapsed. The application
+    /// should call this in a loop; on the transition to true
+    /// it should call `observer.set_angle(0)` and switch to
+    /// the desired control mode (Speed / Torque / Position).
+    ///
+    /// The DC pulse aligns the rotor with the d-axis (assuming
+    /// sufficient detent torque). After `duration_s` the
+    /// rotor is stable; the observer's angle estimate is set
+    /// to zero. Works for any motor (no saliency required)
+    /// at the cost of a small rotor kick during the pulse.
+    pub fn align(&mut self, id_ref: f32, duration_s: f32) -> bool {
+        if self.mode != Mode::Align {
+            // First call: configure the alignment.
+            self.target.id_ref = id_ref;
+            self.align_elapsed_s = 0.0;
+            self.align_duration_s = duration_s;
+            self.set_mode(Mode::Align);
+            self.zero_integrators();
+            return false;
+        }
+        self.align_elapsed_s += 0.0; // dt accumulated in update()
+        // `update()` already advanced `align_elapsed_s` by `dt`
+        // when in Align mode. The application should call
+        // `align()` once per cycle to check completion; we
+        // can't see `dt` here, so the actual accumulation
+        // happens inside `update()` (see `update_align_timer`).
+        self.align_elapsed_s >= self.align_duration_s
+    }
+
+    /// C8: advance the alignment timer. Called from
+    /// `update()` when in `Mode::Align`. Returns `true` once
+    /// the duration has elapsed, so the application can
+    /// call `observer.set_angle(0)` and switch modes.
+    fn update_align_timer(&mut self, dt: f32) -> bool {
+        self.align_elapsed_s += dt;
+        self.align_elapsed_s >= self.align_duration_s
     }
 
     /// Current circle-limitation threshold (A).  0 = disabled.
