@@ -3,6 +3,7 @@
 
 mod bsp;
 mod drivers;
+mod key_store;
 mod metadata;
 mod motor;
 mod ota;
@@ -40,6 +41,20 @@ async fn main(spawner: Spawner) {
     // 500 ms. Previous code started it but never refreshed — the
     // device reset every ~32 s.
     wdog::init(iwdg);
+
+    // C5: load (or generate) the per-device SAL keys and install
+    // them into UDS_CONFIG. The previous code shipped plaintext
+    // key material in the ELF, which meant anyone with the source
+    // could complete the 0x27 handshake offline. The new flow
+    // reads the keys from a dedicated flash region (or generates
+    // them on first boot) so each device has unique material.
+    let live_keys = key_store::init();
+    critical_section::with(|cs| {
+        crate::uds::static_config::UDS_CONFIG
+            .borrow_ref_mut(cs)
+            .key_masks
+            .set(live_keys);
+    });
 
     // Log firmware identity.
     info!("Firmware: {} (git {})", env!("FOC_VERSION"), env!("FOC_GIT_SHA"));

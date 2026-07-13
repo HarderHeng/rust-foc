@@ -92,6 +92,14 @@ fn write_key_masks(data: &[u8]) -> Result<(), Nrc> {
             .key_masks
             .set(masks);
     });
+    // C5: persist the new keys to the per-device flash region
+    // so they survive a reboot. If the write fails (flash
+    // error, brownout, etc.), the new keys are still active
+    // for the current session but will be replaced by the
+    // stored values on next boot.
+    if let Err(_e) = crate::key_store::store(&masks) {
+        defmt::warn!("UDS: key_masks updated in RAM but flash persist failed");
+    }
     defmt::info!("UDS: key_masks updated via DID 0xF180");
     Ok(())
 }
