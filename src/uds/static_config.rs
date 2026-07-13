@@ -12,6 +12,8 @@
 //! `ROUTINES_START` / `_STOP` / `_RESULT`.
 
 use crate::ota;
+use core::cell::RefCell;
+use critical_section::Mutex;
 use embassy_stm32::pac::RNG;
 use uds_core::crypto::AesBlock;
 use uds_core::pending::UdsContext;
@@ -43,7 +45,9 @@ static SERVICES: &[ServiceEntry] = &[
 
 /// 0xF186 = ActiveDiagSession. Read-only 1-byte value.
 fn read_active_session(out: &mut [u8; 64]) -> Result<usize, Nrc> {
-    out[0] = crate::uds::UDS_STATE.session.as_u8();
+    out[0] = critical_section::with(|cs| {
+        crate::uds::UDS_STATE.borrow_ref(cs).session.as_u8()
+    });
     Ok(1)
 }
 
@@ -78,12 +82,16 @@ fn write_key_masks(data: &[u8]) -> Result<(), Nrc> {
         AesBlock(raw[1]),
         AesBlock(raw[2]),
     ];
-    // Safety: single-threaded executor; Cell::set avoids the
-    // &mut aliasing UB that the previous raw-pointer cast had.
-    unsafe {
-        let cfg = &*(&raw const crate::uds::static_config::UDS_CONFIG);
-        cfg.key_masks.set(masks);
-    }
+    // C11: UDS_CONFIG is now wrapped in a `RefCell` inside a
+    // `critical_section::Mutex`. Locking the CS gives us a
+    // `&mut UdsConfig` cleanly; the `Cell::set` is no longer
+    // needed (we have exclusive access).
+    critical_section::with(|cs| {
+        crate::uds::static_config::UDS_CONFIG
+            .borrow_ref_mut(cs)
+            .key_masks
+            .set(masks);
+    });
     defmt::info!("UDS: key_masks updated via DID 0xF180");
     Ok(())
 }
@@ -98,10 +106,12 @@ static WRITE_DIDS: &[DidWriteEntry] = &[
 ];
 
 // ---- Pending queue -------------------------------------------------------
-
+//
 // 4 slots covers TransferData + TransferExit + 2 waiting.
-static mut PENDING_QUEUE: [Option<uds_core::pending::PendingJob>; 4]
-    = [None, None, None, None];
+// The queue is now embedded inside `UdsConfig` itself (a
+// fixed-size array) so the whole config can live inside a
+// `Mutex::new(...)` static without needing a `static mut`
+// backing buffer or a raw-pointer cast.
 
 // ---- Routine callbacks ---------------------------------------------------
 
@@ -196,37 +206,47 @@ fn ota_transfer_exit(ctx: &mut UdsContext) {
 /// AES-128 key material per SAL. Index 0/1/2 = SAL1/2/3.
 /// Writable at runtime via DID 0xF180. The smoke tests expect
 /// these default values — see `scripts/smoke_test.py`.
-pub static mut UDS_CONFIG: UdsConfig = UdsConfig {
-    services: SERVICES,
-    read_dids: READ_DIDS,
-    write_dids: WRITE_DIDS,
-    routines_start: ROUTINES_START,
-    routines_stop: ROUTINES_STOP,
-    routines_result: ROUTINES_RESULT,
-    pending_queue: unsafe { &mut *(&raw mut PENDING_QUEUE) },
-    p2_server_ms: 50,
-    request_timeout_ms: 5000,
-    sa_max_attempts: 3,
-    key_masks: core::cell::Cell::new([
-        AesBlock::from_bytes([
-            0x30, 0x00, 0x22, 0x12, 0xAB, 0xCD, 0xEF, 0x01,
-            0x23, 0x45, 0x67, 0x89, 0x01, 0x23, 0x45, 0x67,
+///
+/// C11: wrapped in a `critical_section::Mutex<RefCell<…>>`
+/// (the same pattern used by `store_response` in
+/// `uds-core/src/state.rs`). The `RefCell` provides
+/// interior `&mut` access; the `critical_section::Mutex`
+/// guards against concurrent access from interrupts. The
+/// previous `static mut` + raw-pointer cast pattern was
+/// Stacked-Borrows UB whenever `write_key_masks` re-entered
+/// the dispatcher.
+pub static UDS_CONFIG: Mutex<RefCell<UdsConfig>> =
+    Mutex::new(RefCell::new(UdsConfig {
+        services: SERVICES,
+        read_dids: READ_DIDS,
+        write_dids: WRITE_DIDS,
+        routines_start: ROUTINES_START,
+        routines_stop: ROUTINES_STOP,
+        routines_result: ROUTINES_RESULT,
+        pending_queue: [None, None, None, None],
+        p2_server_ms: 50,
+        request_timeout_ms: 5000,
+        sa_max_attempts: 3,
+        key_masks: core::cell::Cell::new([
+            AesBlock::from_bytes([
+                0x30, 0x00, 0x22, 0x12, 0xAB, 0xCD, 0xEF, 0x01,
+                0x23, 0x45, 0x67, 0x89, 0x01, 0x23, 0x45, 0x67,
+            ]),
+            AesBlock::from_bytes([
+                0x52, 0x4C, 0x5E, 0x63, 0xDE, 0xAD, 0xBE, 0xEF,
+                0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+            ]),
+            AesBlock::from_bytes([
+                0xA5, 0xC3, 0xF1, 0x1B, 0xCA, 0xFE, 0xBA, 0xBE,
+                0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12,
+            ]),
         ]),
-        AesBlock::from_bytes([
-            0x52, 0x4C, 0x5E, 0x63, 0xDE, 0xAD, 0xBE, 0xEF,
-            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-        ]),
-        AesBlock::from_bytes([
-            0xA5, 0xC3, 0xF1, 0x1B, 0xCA, 0xFE, 0xBA, 0xBE,
-            0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12,
-        ]),
-    ]),
-    on_default_session_enter: None,
-    on_programming_session_enter: None,
-    on_extended_session_enter: None,
-    seed_fn: Some(rng_seed),
-    key_fn: None,
-    request_download_fn: Some(ota_request_download),
-    transfer_data_fn: Some(ota_transfer_data),
-    transfer_exit_fn: Some(ota_transfer_exit),
-};
+        on_default_session_enter: None,
+        on_programming_session_enter: None,
+        on_extended_session_enter: None,
+        seed_fn: Some(rng_seed),
+        key_fn: None,
+        request_download_fn: Some(ota_request_download),
+        transfer_data_fn: Some(ota_transfer_data),
+        transfer_exit_fn: Some(ota_transfer_exit),
+    }));
