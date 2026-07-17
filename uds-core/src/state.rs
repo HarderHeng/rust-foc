@@ -38,6 +38,13 @@ pub struct UdsState {
     /// Resets on successful unlock, session change, or power cycle.
     /// When ≥ `config.sa_max_attempts`, returns 0x36 ExceededNumberOfAttempts.
     pub sa_fail_count: u8,
+
+    /// Snapshotted SID of the pending operation. Set by `push_pending`
+    /// when transitioning to `SrvState::Pending`; used by the tick
+    /// loop to emit correct 0x78 ResponsePending frames even when a
+    /// new request has overwritten `request_buf`. 0 means no pending
+    /// operation.
+    pub pending_sid: u8,
 }
 
 impl UdsState {
@@ -54,6 +61,7 @@ impl UdsState {
             request_tick_ms: 0,
             tx_disabled: false,
             sa_fail_count: 0,
+            pending_sid: 0,
         }
     }
 }

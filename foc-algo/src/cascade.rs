@@ -26,7 +26,7 @@ use crate::math::{circle_limitation, decoupling_voltage, Duty, Pid, Ramp, Trig};
 use crate::motor::MotorParams;
 use crate::state::{ControllerState, Meas, Target};
 
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Mode { #[default] Off, Align, Torque, Speed, Position }
 
@@ -158,7 +158,11 @@ impl FocController {
     /// On mode change, ramps are seeded from current measurements for
     /// bumpless transfer.
     pub fn update<T: Trig>(&mut self, dt: f32) {
-        if dt <= 0.0 {
+        // Reject non-finite and non-positive dt with the same no-op
+        // semantics: a single NaN/+Inf cycle would otherwise poison the
+        // iq_ramp (`rate_limit * dt = NaN/Inf` leaks through `clamp`) and
+        // crash or latch the controller disabled until power-cycle.
+        if !dt.is_finite() || dt <= 0.0 {
             return;
         }
         // C9: NaN / Inf guard on **all** controller inputs (measurements
@@ -734,6 +738,59 @@ mod tests {
         let duty_before = c.duty;
         c.update::<LibmTrig>(-0.001);
         approx(c.duty.ta, duty_before.ta);
+    }
+
+    #[test] fn dt_nan_is_noop() {
+        // Non-finite dt must take the same no-op path as dt<=0.0: the
+        // controller state (duty + PI integrators + ramp state) must be
+        // byte-for-byte unchanged. Without the guard, NaN propagates
+        // through `iq_ramp.update` (`rate_limit * dt = NaN` → `value +=
+        // error.clamp(NaN, NaN) = NaN` when error>0). The poisoned ramp
+        // then leaks NaN through the current loop and latches the
+        // controller disabled until power-cycle.
+        let mut c = make(Mode::Torque);
+        // Re-enable iq_ramp (make() disables it). Target is 2.0 so after
+        // a single prime at dt=0.001 the ramp sits mid-way at value≈1.0;
+        // any bad-dt call that re-evaluates the ramp will move it onward.
+        c.iq_ramp.rate_limit = 1000.0;
+        c.current_pid_d().kp = 0.5;
+        c.current_pid_q().kp = 0.5;
+        c.target.iq = 2.0;
+        c.update::<LibmTrig>(0.001);
+
+        let duty_before = c.duty;
+        let iq_ramp_before = c.iq_ramp.value();
+
+        c.update::<LibmTrig>(f32::NAN);
+
+        approx(c.duty.ta, duty_before.ta);
+        approx(c.duty.tb, duty_before.tb);
+        approx(c.duty.tc, duty_before.tc);
+        approx(c.iq_ramp.value(), iq_ramp_before);
+    }
+
+    #[test] fn dt_positive_infinity_is_noop() {
+        // +Inf dt must take the same no-op path as dt<=0.0. Without the
+        // guard, +Inf passes the inner `dt > 0.0` PID check (true), the
+        // PI integrator saturates, the iq_ramp jumps unclamped to its
+        // target, and the duty diverges. After the fix, all controller
+        // state remains unchanged.
+        let mut c = make(Mode::Torque);
+        c.iq_ramp.rate_limit = 1000.0;
+        c.current_pid_d().kp = 0.5;
+        c.current_pid_q().kp = 0.5;
+        c.target.iq = 2.0;
+        c.update::<LibmTrig>(0.001);
+
+        let duty_before = c.duty;
+        let iq_ramp_before = c.iq_ramp.value();
+
+        c.update::<LibmTrig>(f32::INFINITY);
+
+        approx(c.duty.ta, duty_before.ta);
+        approx(c.duty.tb, duty_before.tb);
+        approx(c.duty.tc, duty_before.tc);
+        approx(c.iq_ramp.value(), iq_ramp_before);
     }
 
     // ── Demag protection ──

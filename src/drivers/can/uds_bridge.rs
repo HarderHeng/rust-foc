@@ -46,7 +46,30 @@ pub const COB_ID_PHYSICAL_RESPONSE: u16 = 0x7E8;
 /// ISO 14229-1 §6.3: SecurityAccess (0x27) is a point-to-point service;
 /// accepting it on a broadcast COB-ID would let any node on the bus
 /// trigger seed/key exchanges intended for a single ECU.
-const FUNCTIONAL_BLOCKED_SIDS: &[u8] = &[0x27];
+///
+/// State-changing / security / programming SIDs are blocked on
+/// functional requests to prevent unintended broadcast activation:
+///   0x10 – DiagnosticSessionControl (programming/extended only)
+///   0x11 – EcuReset
+///   0x27 – SecurityAccess
+///   0x28 – CommunicationControl
+///   0x2E – WriteDataByIdentifier
+///   0x31 – RoutineControl
+///   0x34 – RequestDownload
+///   0x36 – TransferData
+///   0x37 – RequestTransferExit
+fn functional_blocked(sid: u8, request: &[u8]) -> bool {
+    match sid {
+        0x10 => {
+            // Subfunction is in request[1]. Block programming (0x02)
+            // and extended (0x03) sessions on functional; allow
+            // defaultSession 0x01 (wake-up broadcast is valid).
+            request.len() > 1 && (request[1] & 0x7F) >= 0x02
+        }
+        0x11 | 0x27 | 0x28 | 0x2E | 0x31 | 0x34 | 0x36 | 0x37 => true,
+        _ => false,
+    }
+}
 
 /// True iff `id` is a UDS request we should handle (either
 /// functional broadcast or our physical address).
@@ -101,12 +124,11 @@ impl UdsTransport for DefaultUdsTransport {
         if request.is_empty() {
             return None;
         }
-        // ISO 14229-1 §6.3: reject security-sensitive SIDs on
-        // functional (0x7DF) addressing. These are point-to-point
-        // services that must not be broadcast.
+        // ISO 14229-1 §6.3: reject state-changing / security /
+        // programming SIDs on functional (0x7DF) addressing.
         if id == COB_ID_FUNCTIONAL_REQUEST
             && !request.is_empty()
-            && FUNCTIONAL_BLOCKED_SIDS.contains(&request[0])
+            && functional_blocked(request[0], request)
         {
             return None;
         }

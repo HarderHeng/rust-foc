@@ -16,7 +16,7 @@ use subtle::ConstantTimeEq;
 use crate::crypto::{generate_key, AesBlock};
 use crate::pending::{push_pending, PendingFn, UdsContext};
 use crate::state::{store_response, UdsState};
-use crate::types::{Nrc, SecurityLevel, Session};
+use crate::types::{Nrc, SecurityLevel, Session, SrvState};
 use crate::uds_log;
 
 // ============================================================================
@@ -632,6 +632,18 @@ impl UdsConfig {
         }
         state.request_tick_ms = now_ms;
         let sid = request[0];
+
+        // Busy guard: while a pending-queue continuation is in
+        // flight, reject every new request with 0x21 BusyRepeatRequest.
+        // Without this guard a new request would overwrite the pending
+        // operation's `request_buf` (used by the 0x78 ResponsePending
+        // machinery via the snapshotted `pending_sid`), breaking the
+        // protocol state machine.
+        if state.state == SrvState::Pending {
+            store_response(&Nrc::BusyRepeatRequest.negative_response(sid));
+            return;
+        }
+
         let entry = match self.services.iter().find(|e| e.sid == sid) {
             Some(e) => e,
             None => {

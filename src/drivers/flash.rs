@@ -1,4 +1,9 @@
 //! STM32G431 flash driver, embassy-boot swap model.
+//!
+//! All flash-modifying operations are wrapped in
+//! [`critical_section`] to prevent interrupt re-entry during
+//! the unlock → manipulate → lock window, and every write is
+//! verified by read-back.
 
 use embassy_stm32::pac;
 
@@ -6,7 +11,7 @@ const FLASH_BASE: u32 = 0x0800_0000;
 const ERASE_SIZE: u32 = 2048;
 
 #[derive(defmt::Format)]
-pub enum FlashError { Unaligned, OutOfBounds, CrossPage, ProgramError }
+pub enum FlashError { Unaligned, OutOfBounds, CrossPage, ProgramError, VerifyFailed }
 
 #[inline(never)] fn page_of(offset: u32) -> u32 { (offset - FLASH_BASE) / ERASE_SIZE }
 pub unsafe fn read_u32(offset: u32) -> u32 { core::ptr::read_volatile(offset as *const u32) }
@@ -28,15 +33,42 @@ pub unsafe fn write_u64(offset: u32, start: u32, end: u32, value: u64) -> Result
     if offset % 8 != 0 { return Err(FlashError::Unaligned); }
     if offset < start || offset + 8 > end { return Err(FlashError::OutOfBounds); }
     if page_of(offset) != page_of(offset + 7) { return Err(FlashError::CrossPage); }
-    unlock_sequence(); let flash = pac::FLASH; flash.cr().modify(|w| w.set_pg(true));
-    core::ptr::write_volatile(offset as *mut u64, value); wait_busy();
-    check_and_clear_errors()?; flash.cr().modify(|w| w.set_pg(false)); lock(); Ok(())
+    critical_section::with(|_| {
+        unlock_sequence();
+        let flash = pac::FLASH;
+        flash.cr().modify(|w| w.set_pg(true));
+        core::ptr::write_volatile(offset as *mut u64, value);
+        wait_busy();
+        let result = check_and_clear_errors();
+        flash.cr().modify(|w| w.set_pg(false));
+        lock();
+        result
+    })?;
+    // Read-back verification — catches bus-level faults or
+    // unexpected erase-under-write races.
+    if core::ptr::read_volatile(offset as *const u64) != value {
+        return Err(FlashError::VerifyFailed);
+    }
+    Ok(())
 }
 pub unsafe fn erase_region(start: u32, end: u32) -> Result<(), FlashError> {
-    unlock_sequence(); let flash = pac::FLASH; flash.cr().modify(|w| w.set_per(true));
-    for page in page_of(start)..page_of(end) {
-        flash.cr().modify(|w| w.set_pnb(page as u8)); flash.cr().modify(|w| w.set_strt(true));
-        wait_busy(); check_and_clear_errors()?;
-    }
-    flash.cr().modify(|w| { w.set_per(false); w.set_strt(false); }); lock(); Ok(())
+    critical_section::with(|_| {
+        unlock_sequence();
+        let flash = pac::FLASH;
+        flash.cr().modify(|w| w.set_per(true));
+        for page in page_of(start)..page_of(end) {
+            flash.cr().modify(|w| w.set_pnb(page as u8));
+            flash.cr().modify(|w| w.set_strt(true));
+            wait_busy();
+            let result = check_and_clear_errors();
+            if result.is_err() {
+                flash.cr().modify(|w| { w.set_per(false); w.set_strt(false); });
+                lock();
+                return result;
+            }
+        }
+        flash.cr().modify(|w| { w.set_per(false); w.set_strt(false); });
+        lock();
+        Ok(())
+    })
 }

@@ -97,7 +97,7 @@ fn fast_parse_f32(s: &str) -> Option<f32> {
 // ── Execute a parsed command ──
 
 /// Execute a command. Returns a static response string (no formatting needed).
-pub fn exec_cmd<W: embedded_io::Write>(writer: &mut W, cmd: Cmd) {
+pub async fn exec_cmd<W: embedded_io_async::Write>(writer: &mut W, cmd: Cmd) {
     match cmd {
         Cmd::Help => {
             let _ = writer.write(
@@ -107,43 +107,43 @@ pub fn exec_cmd<W: embedded_io::Write>(writer: &mut W, cmd: Cmd) {
                   reboot         reset MCU\r\n\
                   spin <hz> <v>  open-loop spin\r\n\
                   stop           stop spin\r\n",
-            );
+            ).await;
         }
         Cmd::Version => {
-            let _ = writer.write(env!("CARGO_PKG_VERSION").as_bytes());
-            let _ = writer.write(b"\r\n");
+            let _ = writer.write(env!("CARGO_PKG_VERSION").as_bytes()).await;
+            let _ = writer.write(b"\r\n").await;
         }
         Cmd::Info => {
-            let _ = writer.write(BOARD_NAME.as_bytes());
-            let _ = writer.write(b"\r\n");
-            let _ = writer.write(BOARD_MCU.as_bytes());
-            let _ = writer.write(b"\r\n  flash: ");
-            let _ = write_u32(writer, FLASH_SIZE_KB);
-            let _ = writer.write(b" KB\r\n  sram:  ");
-            let _ = write_u32(writer, SRAM_SIZE_KB);
-            let _ = writer.write(b" KB\r\n");
+            let _ = writer.write(BOARD_NAME.as_bytes()).await;
+            let _ = writer.write(b"\r\n").await;
+            let _ = writer.write(BOARD_MCU.as_bytes()).await;
+            let _ = writer.write(b"\r\n  flash: ").await;
+            write_u32(writer, FLASH_SIZE_KB).await;
+            let _ = writer.write(b" KB\r\n  sram:  ").await;
+            write_u32(writer, SRAM_SIZE_KB).await;
+            let _ = writer.write(b" KB\r\n").await;
         }
         Cmd::Reboot => {
-            let _ = writer.write(b"Rebooting...\r\n");
+            let _ = writer.write(b"Rebooting...\r\n").await;
             run_stop_inner();
             REBOOT_REQUESTED.store(true, core::sync::atomic::Ordering::Relaxed);
         }
-        Cmd::Spin { freq_hz, voltage } => run_spin(writer, freq_hz, voltage),
+        Cmd::Spin { freq_hz, voltage } => run_spin(writer, freq_hz, voltage).await,
         Cmd::Stop => {
             run_stop_inner();
-            let _ = writer.write(b"stop ok\r\n");
+            let _ = writer.write(b"stop ok\r\n").await;
         }
         Cmd::Unknown => {
-            let _ = writer.write(b"unknown command\r\n");
+            let _ = writer.write(b"unknown command\r\n").await;
         }
     }
 }
 
 // ── Helpers ──
 
-fn write_u32<W: embedded_io::Write>(w: &mut W, mut n: u32) {
+async fn write_u32<W: embedded_io_async::Write>(w: &mut W, mut n: u32) {
     if n == 0 {
-        let _ = w.write(b"0");
+        let _ = w.write(b"0").await;
         return;
     }
     let mut digits = [0u8; 10];
@@ -153,20 +153,20 @@ fn write_u32<W: embedded_io::Write>(w: &mut W, mut n: u32) {
         digits[i] = b'0' + (n % 10) as u8;
         n /= 10;
     }
-    let _ = w.write(&digits[i..]);
+    let _ = w.write(&digits[i..]).await;
 }
 
-fn run_spin<W: embedded_io::Write>(w: &mut W, freq_hz: f32, voltage: f32) {
+async fn run_spin<W: embedded_io_async::Write>(w: &mut W, freq_hz: f32, voltage: f32) {
     if !freq_hz.is_finite() || !voltage.is_finite() {
-        let _ = w.write(b"spin: values must be finite\r\n");
+        let _ = w.write(b"spin: values must be finite\r\n").await;
         return;
     }
     if freq_hz < 0.0 {
-        let _ = w.write(b"spin: freq must be >= 0\r\n");
+        let _ = w.write(b"spin: freq must be >= 0\r\n").await;
         return;
     }
     if voltage < 0.0 {
-        let _ = w.write(b"spin: voltage must be >= 0\r\n");
+        let _ = w.write(b"spin: voltage must be >= 0\r\n").await;
         return;
     }
     let clamped_f = if freq_hz > MAX_SPIN_FREQ_HZ { MAX_SPIN_FREQ_HZ } else { freq_hz };
@@ -176,7 +176,7 @@ fn run_spin<W: embedded_io::Write>(w: &mut W, freq_hz: f32, voltage: f32) {
         freq_hz: clamped_f,
         voltage: clamped_v,
     }));
-    let _ = w.write(b"spin ok\r\n");
+    let _ = w.write(b"spin ok\r\n").await;
 }
 
 fn run_stop_inner() {

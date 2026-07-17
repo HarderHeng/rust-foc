@@ -49,6 +49,7 @@ pub fn push_pending(state: &mut UdsState, config: &mut UdsConfig, f: PendingFn) 
     for slot in config.pending_queue.iter_mut() {
         if slot.is_none() {
             *slot = Some(PendingJob::new(f));
+            state.pending_sid = state.request_buf[0];
             state.state = SrvState::Pending;
             return true;
         }
@@ -121,9 +122,9 @@ pub fn tick(state: &mut UdsState, config: &mut UdsConfig, now_ms: u32) {
             }
             state.state = SrvState::Idle;
             state.request_tick_ms = now_ms;
-            if state.request_len > 0 {
-                let sid = state.request_buf[0];
-                let bytes = Nrc::GeneralProgrammingFailure.negative_response(sid);
+            if state.pending_sid != 0 {
+                let bytes = Nrc::GeneralProgrammingFailure
+                    .negative_response(state.pending_sid);
                 store_response(&bytes);
             }
         }
@@ -131,12 +132,14 @@ pub fn tick(state: &mut UdsState, config: &mut UdsConfig, now_ms: u32) {
 }
 
 /// Push a 0x78 ResponsePending frame into the response buffer.
+/// Uses the snapshotted `pending_sid` rather than `request_buf[0]`
+/// so the correct SID is emitted even if a new request has since
+/// overwritten the request buffer.
 fn send_response_pending(state: &mut UdsState) {
-    if state.request_len == 0 {
+    if state.pending_sid == 0 {
         return;
     }
-    let sid = state.request_buf[0];
     let bytes = Nrc::RequestCorrectlyReceivedResponsePending
-        .negative_response(sid);
+        .negative_response(state.pending_sid);
     store_response(&bytes);
 }
